@@ -1,0 +1,589 @@
+---
+title: "ChapterIV_toy_example_part1"
+author: "Yael Gutman"
+date: "`r Sys.Date()`"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load libraries
+```{r libraries}
+library(dplyr)
+library(tidyr)
+library(text2vec)
+library(tidyverse)
+library(tidytext)
+library(ggplot2)
+library(tm)
+library(stringr)
+library(pdftools)
+library(readr)
+library(textstem)
+library(textclean)
+library(lexicon)
+library(Matrix)
+library(proxy)
+library(gridExtra)
+```
+
+##############################  BECK & ABE - SHORT EXCERPT EXAMPLE #################################
+
+# PRE-PROCESSING AND PMI MATRIX TRANSFORMATION ---------------------------------
+## a) Cleaning
+```{r cleaning beck 2 excerpt}
+## Input: excerpt of example raw psychotherapy transcript Dr. Judith Beck and Abe session 2
+## Output: cleaned, lowercase single string (without unwanted characters or digits)
+
+# reading-in and cleaning file(s)
+beck_sess2_toy <- pdf_text("Beck sess2 toy example.pdf")
+
+# collapse text into one
+beck_session2_text <- paste(beck_sess2_toy, collapse = "\n")
+
+# removing unnecessary characters:
+beck2_remov <- gsub("\n", " ", beck_session2_text) # remove "\n" character
+beck2_remov <- gsub("\"", "", beck2_remov) # remove slash
+beck2_short_cleaned <- beck2_remov %>%
+  str_replace_all("\\[[^\\]]*\\]", "") %>% # replaces text in brackets such as comments
+  str_replace_all("(^|\\s)(Judith:|Abe:)", "") %>% # removing speaker labels
+  str_replace_all("\\([^\\)]*\\)", "") %>% # removes text inside parenthesis
+  str_replace_all("\\s+", " ") %>% # removes additional spaces
+  str_replace_all("[0-9]", "") %>% # removes digits
+  replace_contraction() %>% # replace contractions with corresponding words
+  as.character() %>% 
+  removePunctuation(ucp = TRUE) %>% # removes all remaining punctuation
+  tolower() %>% # changes to lowercase letters
+  str_trim() # eliminates any remaining unwanted white space
+```
+
+## b) Tokenization, frequency filters, and lemmatization 
+```{r load pre-processing functions}
+# Tokenization: convert string to tibble and create tokens
+token_func <- function(processed_text){
+  
+  # convert string into tibble
+  text_df <- tibble(text = processed_text)
+  
+  # convert to tokens
+  text_tokens <- text_df %>%
+    unnest_tokens(word, text)
+  
+  return(text_tokens)
+}
+
+# Stop words removal
+stop_words_removal <- function(text_tokens, custom_stop_words){
+  # adds custom stop-words to stop-word lexicon
+  stop_words <- rbind(stop_words, data.frame( word = custom_stop_words, lexicon = "custom"))
+  
+  # removes words in stop-word lexicon
+  nostop_text_tokens <- text_tokens %>%
+    anti_join(stop_words, by = "word")
+  
+  return(nostop_text_tokens)
+}
+
+# Lemmatization: uses textstem, however, results are not optimal (e.g. feelings and feel are not given the same lemma)
+lemmatization_func <- function(nostop_text_tokens){
+  
+  # uses hash_lemmas lexicon to lemmatize the tokens
+  lemm_tokens <- nostop_text_tokens %>%
+    mutate(word = lemmatize_strings(word, dictionary = lexicon::hash_lemmas))
+  
+  return(lemm_tokens)
+}
+
+# Rare words removal: empty function for now
+rare_words_removal <- function(lemm_tokens, freq_threshold){
+  
+  # Add row number to preserve order
+  lemm_tokens <- lemm_tokens %>%
+    mutate(row_num = row_number())
+  
+  # count n words
+  lemma_count <- lemm_tokens %>%
+    count(word)
+  
+  # filter words with count less than threshold
+  norare_text_tokens <- lemm_tokens %>%
+    inner_join(lemma_count %>% filter(n > freq_threshold), by = "word") %>%
+    arrange(row_num) %>%
+    dplyr::select(-row_num, -n)
+  
+  return(norare_text_tokens)
+}
+```
+
+## c) Co-occurrence matrix, and PMI correction functions
+```{r load co-occurrence functions}
+### Functions: co-occ matrix, word_count, pmi_formula_COR, assoc_matrix_func_COR, pipeline_matrices_func_COR
+# PMI matrix function correction --------------------------------------------
+co_occ_matrix_func_COR <- function(lemm_tokens, window_size, weights){
+  
+  if(is.null(weights) == TRUE){
+    weights <- rep(1, window_size)
+  }
+  else{
+    weights <- 1/seq_len(window_size)
+  }
+  
+  # create an iterator and a unique vocabulary of terms
+  words_ls <- list(lemm_tokens$word)
+  it <- itoken(words_ls, progressbar = FALSE ) # itoken: allows the iteration of each token at a time, for memory purposes
+  vocab <- create_vocabulary(it) 
+  
+  # create a token co-occurrence matrix (TCM) using iterator, vectorizer and specified window
+  vectorizer <- vocab_vectorizer(vocab) 
+  tcm <- create_tcm(it, vectorizer, weights, skip_grams_window = window_size,
+                    skip_grams_window_context = "symmetric")
+
+  # symmetrize matrix
+  tcm_matrix <- as.matrix(tcm)
+  tcm_matrix[lower.tri(tcm_matrix)] <- t(tcm_matrix)[lower.tri(tcm_matrix)]
+  
+  return(tcm_matrix)
+}
+
+word_count <- function(final_tokens, tcm_matrix){
+  # Create the dictionary with word counts
+  word_counts <- final_tokens %>%
+    group_by(word) %>%
+    summarise(count = n(), .groups = 'drop')
+  
+  # arrange word counts in order of tcm
+  tcm_words <- colnames(tcm_matrix)
+  word_counts <- word_counts %>%
+    mutate(word = factor(word, levels = tcm_words)) %>%
+    arrange(word)
+  word_counts <- word_counts$count
+  
+  return(word_counts)
+}
+
+pmi_formula_COR <- function(wco_prob, mult_ind_prob){
+  value <- log2(wco_prob / mult_ind_prob)
+  return(value)
+}
+
+assoc_matrix_func_COR <- function(tcm_matrix, tformula, n_words, word_counts){
+  
+  # convert into a sparse matrix
+  tcm_sparse_matrix <-  Matrix(tcm_matrix, sparse=T)
+  tcm_sparse_matrix <- as(tcm_sparse_matrix, "TsparseMatrix")
+  
+  # Calculate independent word-co-occurrence probabilities for each word
+  row_prob <- word_counts / n_words
+  col_prob <- word_counts / n_words
+  
+  # Create a sparse matrix to store PMI values
+  r_words <- nrow(tcm_sparse_matrix)
+  c_words <- ncol(tcm_sparse_matrix)
+  tmatrix <- matrix(0, nrow = r_words, ncol = c_words)
+  
+  # Iterate over non-zero elements of the sparse matrix
+  for (i in seq_len(length(tcm_sparse_matrix@x))){
+    r <- tcm_sparse_matrix@i[i] + 1  # Row index (convert from 0-based to 1-based)
+    c <- tcm_sparse_matrix@j[i] + 1  # Column index (convert from 0-based to 1-based)
+    wco <- tcm_sparse_matrix@x[i]    # Word co-occurrence count
+    
+    # pair word co-occurrence probability
+    wco_prob <- ( wco / n_words )
+    
+    # multiplied independent probabilities for each word
+    mult_ind_prob <- ( row_prob[r] * col_prob[c] )
+    if(mult_ind_prob == 0){
+      tmatrix[r, c] <- 0
+    }
+    else{
+      # calculate association measure according to given formula
+      tmatrix[r, c] <- tformula(wco_prob, mult_ind_prob)
+    }
+  }
+  # make matrix sparse and symmetrize
+  tmatrix <- Matrix(tmatrix, sparse=T)
+  pmi_matrix <- as.matrix(tmatrix)
+  pmi_matrix[lower.tri(pmi_matrix)] <- t(pmi_matrix)[lower.tri(pmi_matrix)]
+  return(pmi_matrix)
+}
+
+# PIPELINE FUNCTION WITH CORRECTIONS
+pipeline_matrices_func_COR <- function(text, window_size, custom_stop_words, freq_threshold, weights){
+  
+  # Pre-processing steps:
+  text_tokens <- token_func(text)
+  nostop_text_tokens <- stop_words_removal(text_tokens, custom_stop_words)
+  lemm_tokens <- lemmatization_func(nostop_text_tokens)
+  norare_text_tokens <- rare_words_removal(lemm_tokens, freq_threshold)
+  n_words <- length(norare_text_tokens$word)
+  
+  # Co-occurrence matrix + transformations: PMI, Chi^2, cosine similarity
+  tcm_matrix <- co_occ_matrix_func_COR(norare_text_tokens, window_size, weights)
+  word_counts <- word_count(norare_text_tokens, tcm_matrix)
+  pmi_matrix <- as.matrix(assoc_matrix_func_COR(tcm_matrix, pmi_formula_COR, n_words, word_counts))
+  
+  # re-assign column and row names
+  colnames(pmi_matrix) <- colnames(tcm_matrix)
+  rownames(pmi_matrix) <- rownames(tcm_matrix)
+  
+  return(list(tokens = text_tokens, processed_tokens = norare_text_tokens, TCM = tcm_matrix, 
+              PMI = pmi_matrix))
+}
+```
+
+## Apply pipeline
+```{r apply functions}
+custom_stop_words <- c("yeah", "mmhmm", "uhhuh", "bit")
+beck2_short_pipeline <- pipeline_matrices_func_COR(beck2_short_cleaned, 
+                                         window_size = 2, 
+                                         custom_stop_words, 
+                                         freq_threshold = 1, 
+                                         weights = NULL)
+beck2_short_pipeline
+```
+
+## DOT PRODUCT -----------------------------------------------------------------
+```{r calculate word pair dot products}
+# exctract PMI matrix from pipeline output
+pmi_df <- as.data.frame(beck2_short_pipeline$PMI)
+
+# calculate each word pair's PMI vector dot product
+dot_matrix <- matrix(NA, nrow = (nrow(pmi_df)*(nrow(pmi_df) + 1))/2, ncol = 3)
+vocab <- colnames(pmi_df)
+rowN <- 1
+for(v in vocab){
+  for (w in vocab){
+    # avoid repeated pairs
+    if (which(vocab == v) <= which(vocab == w)) {
+      
+      # first word in pair
+      dot_matrix[rowN,1] <- v
+      # second word in pair
+      dot_matrix[rowN,2] <- w
+      
+      # calculate 'pure' dot product
+      dp <- sum(pmi_df[,v] * pmi_df[,w])
+      dot_matrix[rowN,3] <- dp
+      
+      # update row value
+      rowN <- rowN + 1
+    }
+  } 
+}
+
+# name columns of dot product matrix
+dot_matrix <- na.omit(dot_matrix)
+colnames(dot_matrix) <- c("word1", "word2", "dp")
+
+# turn into dot product data frame and round values
+df_dp_mat <- as.data.frame(dot_matrix)
+df_dp_mat <- df_dp_mat %>%
+  mutate(dp = as.numeric(dp))
+df_dp_mat <- df_dp_mat %>%
+  mutate(dp = round(dp,2))
+
+# add labels and remove same word dot product (diagonal values)
+pmi_df$word <- c("depress", "prove", "start", "feel")
+diag(pmi_df) <- 0
+```
+
+```{r conceptual space plot toy example depress vs. feel}
+# Conceptual plot to display vectors in 3D space
+# Toy example for 'feel' and 'depress'
+toy_plot1 <- ggplot(pmi_df, aes( x = depress, y = feel)) +
+  geom_point(size = 3) +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black") +  # Add horizontal line at y = 0
+  geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dotted", color = "black") +
+  xlim(0,2) +
+  ylim(0,2) +
+  xlab("Depress") +
+  ylab("Feel") +
+  ggtitle("Conceptual space plot for 'feel' vs. 'depress'") +
+  geom_text(aes(label = word), check_overlap = TRUE, size = 4.5, vjust = -0.7, hjust = -0.1) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 13),  # Center & bold title
+    axis.title = element_text(size = 12),  # Increase axis labels
+    axis.text = element_text(size = 11)  # Increase tick mark labels
+  ) +
+  theme(plot.title = element_text(hjust = 0.5, size = 13, face = "bold"))
+toy_plot1
+```
+
+
+##############################   BECK & ABE - FULL TRANSCRIPT EXAMPLE   #################################
+## a) Cleaning
+```{r full transcripts clean}
+# load full transcript
+# CLEANING STEPS --------------------------------------------------------------
+
+# Reading-in and cleaning file(s)
+beck_session2 <- pdf_text("Beck institute-Session-2-Annotated-Transcript.pdf")
+beck_session10 <- pdf_text("Beck institute-Session-10-Annotated-Transcript-Beck and Abe.pdf")
+
+# select dialogue only
+subset_beck_sess2 <- sub("^.*?(Judith:)", "Judith:", beck_session2)
+subset_beck_sess10 <- sub("^.*?(Judith:)", "Judith:", beck_session10)
+
+# collapse text into one
+beck_session2_text <- paste(subset_beck_sess2, collapse = "\n")
+beck_session10_text <- paste(subset_beck_sess10, collapse = "\n")
+
+# Cleaning text Beck Session 2 ------------------------------------------------
+# Removing unnecessary characters:
+beck2_remov <- gsub("\n", "", beck_session2_text)
+beck2_remov <- gsub("\"", "", beck2_remov)
+beck2_remov <- beck_session2_text %>%
+  str_replace_all("\\[[^\\]]*\\]", "") %>%
+  str_replace_all("\\s+[A-Z]{2,}(\\s+[A-Z]{2,})+\\s", " ") %>%
+  str_replace_all("(^|\\s)(Judith:|Abe:)", "") %>%
+  str_replace_all("\\([^\\)]*\\)", "") %>%
+  str_replace_all("\\s+", " ") %>%
+  str_replace_all("[0-9]", "") #%>%
+#str_replace_all("  ", "")
+
+beck2_replaced <- beck2_remov %>%
+  replace_contraction() %>%
+  as.character() %>%
+  # removes all punctuation including parenthesis
+  removePunctuation(ucp = TRUE) %>%
+  tolower() %>%
+  str_trim() #this eliminates any remaining unwanted white space
+
+# Cleaning text Beck Session 10 -----------------------------------------------
+beck10_remov <- gsub("\n", "", beck_session10_text)
+beck10_remov <- gsub("\"", "", beck10_remov)
+beck10_remov <- beck_session10_text %>%
+  str_replace_all("\\[[^\\]]*\\]", "") %>%
+  str_replace_all("\\s+[A-Z]{2,}(\\s+[A-Z]{2,})+\\s", " ") %>%
+  str_replace_all("(^|\\s)(Judith:|Abe:)", "") %>%
+  str_replace_all("\\([^\\)]*\\)", "") %>%
+  str_replace_all("\\s+", " ") %>%
+  str_replace_all("[0-9]", "") 
+
+beck10_replaced <- beck10_remov %>%
+  replace_contraction() %>%
+  as.character() %>%
+  # removes all punctuation including parenthesis
+  removePunctuation(ucp = TRUE) %>%
+  tolower() %>%
+  str_trim() #this eliminates any remaining unwanted white space 
+
+beck2_clean <- beck2_replaced
+beck10_clean <- beck10_replaced
+```
+
+## b) Apply pipeline
+```{r apply pipeline Beck 2 and 10}
+custom_stop_words <- c("yeah", "mmhmm", "uhhuh", "bit")
+
+beck2_pipeline <- pipeline_matrices_func_COR(beck2_clean, 
+                                         window_size = 5, 
+                                         custom_stop_words, 
+                                         freq_threshold = 3, 
+                                         weights = NULL )
+
+beck10_pipeline <- pipeline_matrices_func_COR(beck10_clean, 
+                                              window_size = 5, 
+                                              custom_stop_words, 
+                                              freq_threshold = 3, 
+                                              weights = NULL )
+
+# Save processed tokens
+beck2_proc_toks <- as.data.frame(beck2_pipeline$processed_tokens)
+write.csv(beck2_proc_toks, file = "beck2_proc_toks.csv", row.names = TRUE)
+
+beck10_proc_toks  <- as.data.frame(beck10_pipeline$processed_tokens)
+write.csv(beck10_proc_toks, file = "beck10_proc_toks.csv", row.names = TRUE)
+
+
+# Save corrected PMI matrices
+beck2_pmi_val <- as.data.frame(beck2_pipeline$PMI)
+write.csv(beck2_pmi_val, file = "beck2_pmi_COR.csv", row.names = TRUE)
+
+beck10_pmi_val <- as.data.frame(beck10_pipeline$PMI)
+write.csv(beck10_pmi_val, file = "beck10_pmi_COR.csv", row.names = TRUE)
+```
+
+
+##################### PANEL PLOT DROPPING VALUES ARTIFICIALLY #########################
+## Panel plot for dropping dot product
+```{r Panel plot for dropping dot product}
+# add name column
+beck10_pmi_val$word <- colnames(beck10_pmi_val)
+beck2_pmi_val$word <- colnames(beck2_pmi_val)
+
+# HIGHEST DP
+# Toy example for 'talk' and 'hard' --------------------------------------------
+highdp_talk_hard <- ggplot(beck2_pmi_val, aes( x = talk, y = hard, color = pmax(talk,hard) )) +
+  geom_point(size = 3) +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black") +  # Add horizontal line at y = 0
+  geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dotted", color = "black") +
+  xlim(0,7) +
+  ylim(0,7) +
+  xlab("Talk") +
+  ylab("Hard") +
+  ggtitle("Conceptual space plot words 'talk' and 'hard'") +
+  scale_color_gradientn(colors = c("white", "skyblue", "darkblue")) + 
+  theme_minimal() +
+  ggplot2::annotate(geom = "text", x = 6, y = 6, label = "dot product = 637", size = 4, color = "black") +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 15),  # Center & bold title
+    axis.title = element_text(size = 12),  # Increase axis labels
+    axis.text = element_text(size = 11)  # Increase tick mark labels
+  ) +
+  labs(color = "PMI values") +
+  theme(plot.title = element_text(hjust = 0.5, size = 13, face = "bold")) 
+
+beck2_talk_hard <- beck2_pmi_val[,c("talk", "hard")]
+beck2_talk_hard2 <- beck2_talk_hard
+
+
+# MEDIUM - HIGH - Drop of outer edges ------------------------------------------
+beck2_talk_hard <- beck2_pmi_val[,c("talk", "hard")]
+beck2_talk_hard2 <- beck2_talk_hard
+# droping PMI values on the outer edges
+# hard
+beck2_talk_hard2[c("think", "happy", "hear", "bad", "easy", "newspaper", "read", "stuff", 
+                   "lot", "time", "feel", "guess"), 1] <- 0
+# talk
+beck2_talk_hard2[c("plan", "list", "minute", "action", "write", "bed", "automatic", 
+                   "session", "phone"), 2] <- 0
+
+dp_med <- sum(beck2_talk_hard2$talk * beck2_talk_hard2$hard)
+beck2_talk_hard2 <- cbind(beck2_talk_hard2, beck2_pmi_val$word)
+colnames(beck2_talk_hard2) <- c("talk", "hard", "word")
+
+# Toy example for 'talk' and 'hard'
+mediumdp_talk_hard <- ggplot(beck2_talk_hard2, aes( x = talk, y = hard, color = pmax(talk,hard) )) +
+  geom_point(size = 3) +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black") +  # Add horizontal line at y = 0
+  geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dotted", color = "black") +
+  xlim(0,7) +
+  ylim(0,7) +
+  xlab("Talk") +
+  ylab("Hard") +
+  ggtitle("Conceptual space plot words 'talk' and 'hard'") +
+  scale_color_gradientn(colors = c("white", "skyblue", "darkblue")) + 
+  theme_minimal() +
+  ggplot2::annotate(geom = "text", x = 6, y = 6, label = paste0("dot product = ", round(dp_med,0)), size = 4, color = "black") +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 15),  # Center & bold title
+    axis.title = element_text(size = 12),  # Increase axis labels
+    axis.text = element_text(size = 11)  # Increase tick mark labels
+  ) +
+  labs(color = "PMI values") +
+  theme(plot.title = element_text(hjust = 0.5, size = 13, face = "bold")) 
+
+
+# MEDIUM - LOW - Drop of outer edges ------------------------------------------
+beck2_talk_hard <- beck2_pmi_val[,c("talk", "hard")]
+beck2_talk_hard2 <- beck2_talk_hard
+# droping PMI values on the outer edges
+# hard
+beck2_talk_hard2[c("give", "difficult", "talk", "think", "deserve", "hard", "remind", "son", "happy", 
+                   "apartment", "hear", "bad", "easy", "newspaper", "read", "stuff", "lot", "time", 
+                   "feel", "guess", "depression"), 1] <- 0
+# talk
+beck2_talk_hard2[c("ice", "cream", "depress", "make", "credit", "even", "plan", "note", "start", "list", 
+                   "minute", "action", "write", "bed", "automatic", "session", "phone"), 2] <- 0
+
+dp_low <- sum(beck2_talk_hard2$talk * beck2_talk_hard2$hard)
+beck2_talk_hard2 <- cbind(beck2_talk_hard2, beck2_pmi_val$word)
+colnames(beck2_talk_hard2) <- c("talk", "hard", "word")
+
+# Toy example for 'talk' and 'hard'
+lowdp_talk_hard <- ggplot(beck2_talk_hard2, aes( x = talk, y = hard, color = pmax(talk,hard) )) +
+  geom_point(size = 3) +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black") +  # Add horizontal line at y = 0
+  geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dotted", color = "black") +
+  xlim(0,7) +
+  ylim(0,7) +
+  xlab("Talk") +
+  ylab("Hard") +
+  ggtitle("Conceptual space plot words 'talk' and 'hard'") +
+  scale_color_gradientn(colors = c("white", "skyblue", "darkblue")) + 
+  theme_minimal() +
+  ggplot2::annotate(geom = "text", x = 6, y = 6, label = paste0("dot product = ", 
+                                                                round(dp_low,0)), size = 4, color = "black") +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 15),  # Center & bold title
+    axis.title = element_text(size = 12),  # Increase axis labels
+    axis.text = element_text(size = 11)  # Increase tick mark labels
+  ) +
+  labs(color = "PMI values") +
+  theme(plot.title = element_text(hjust = 0.5, size = 13, face = "bold")) 
+
+
+# ZERO - Drop of outer edges ------------------------------------------
+beck2_talk_hard <- beck2_pmi_val[,c("talk", "hard")]
+beck2_talk_hard2 <- beck2_talk_hard
+beck2_talk_hard2[c("call", "therapy", "evening", "school", "rubber", "house", "idea", "sound", 
+                   "difficult", "talk", "think", "deserve", "hard", "remind", "son", "happy", 
+                   "apartment", "hear", "bad", "easy", "newspaper", "read", "stuff", "lot", 
+                   "time", "feel", "guess", "depression"), 1] <- 0
+# talk
+beck2_talk_hard2[c("confidence", "week", "ice", "take", "reason", "give", "optional", "kitchen", 
+                   "walk", "job", "band", "day", "cream", "depress", "make", "lose", "credit", 
+                   "even", "plan", "note", "start", "list", "minute", "action", "write", 
+                   "bed", "automatic", "session", "phone"), 2] <- 0
+
+dp <- sum(beck2_talk_hard2$talk * beck2_talk_hard2$hard)
+beck2_talk_hard2 <- cbind(beck2_talk_hard2, beck2_pmi_val$word)
+colnames(beck2_talk_hard2) <- c("talk", "hard", "word")
+
+# Toy example for 'talk' and 'hard'
+zerodp_talk_hard <- ggplot(beck2_talk_hard2, aes( x = talk, y = hard, color = pmax(talk,hard) )) +
+  geom_point(size = 3) +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black") +  # Add horizontal line at y = 0
+  geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dotted", color = "black") +
+  xlim(0,7) +
+  ylim(0,7) +
+  xlab("Talk") +
+  ylab("Hard") +
+  ggtitle("Conceptual space plot words 'talk' and 'hard'") +
+  scale_color_gradientn(colors = c("white", "skyblue", "darkblue")) + 
+  theme_minimal() +
+  ggplot2::annotate(geom = "text", x = 6, y = 6, label = "dot product = 0", size = 4, color = "black") +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 15),  # Center & bold title
+    axis.title = element_text(size = 12),  # Increase axis labels
+    axis.text = element_text(size = 11)  # Increase tick mark labels
+  ) +
+  labs(color = "PMI values") +
+  theme(plot.title = element_text(hjust = 0.5, size = 13, face = "bold")) 
+
+
+beck2_talk_hard_panelplot <- grid.arrange(highdp_talk_hard, mediumdp_talk_hard, 
+                                             lowdp_talk_hard, zerodp_talk_hard, ncol = 2, nrow = 2)
+beck2_talk_hard_panelplot
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

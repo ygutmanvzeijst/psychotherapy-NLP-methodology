@@ -1,0 +1,628 @@
+---
+title: "ChapterIV_toy_example_part2"
+author: "Yael Gutman"
+date: "`r Sys.Date()`"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries}
+# load libraries
+library(dplyr)
+library(tidyr)
+library(text2vec)
+library(tidyverse)
+library(tidytext)
+library(ggplot2)
+library(tm)
+library(stringr)
+library(readr)
+library(pdftools)
+library(scales)
+library(reshape2)
+library(textstem)
+library(textclean)
+library(wordcloud)
+library(ggraph)
+library(widyr)
+library(igraph)
+library(lexicon)
+library(Matrix)
+library(proxy)
+library(mgcv)
+library(patchwork)
+library(GGally)
+library(knitr)
+library(kableExtra)
+library(gridExtra)
+```
+
+# THREE-LEVEL ANALYSIS
+
+## LEVEL ONE - TF-IDF ----------------------------------------------------------
+```{r re-load processed files}
+beck2_processed <- read.csv("./beck2_proc_toks.csv")
+beck10_processed <- read.csv("./beck10_proc_toks.csv")
+
+# Manually replacing 'depression' with 'depress' as this was unsuccessful with lemmatization
+#beck2_processed <- beck2_processed %>%
+  #mutate(word = case_when(
+    #word == "depression" ~ "depress",
+    #TRUE ~ word
+  #))
+
+beck2_processed %>%
+  count(word, sort = TRUE)
+beck10_processed %>%
+  count(word, sort = TRUE)
+```
+
+```{r calculate tf}
+# Merge session dataframes by row and add column specifying the session #
+beck2_processed <- beck2_processed %>%
+  mutate(session = "Session2")
+beck10_processed <- beck10_processed %>%
+  mutate(session = "Session10")
+beck_both_bind <- rbind(beck2_processed, beck10_processed)
+
+# Calculate word proportion per session and change to wide format
+beck_compare <- beck_both_bind %>%
+  count(session, word) %>%
+  group_by(session) %>%
+  # calculates proportion of words according to count per total number of words
+  mutate(proportion = n / sum(n)) %>%
+  # remove n (count column) after calculating proportions
+  dplyr::select(-n) %>%
+  # first convert to wide format (column for each author)
+  spread(session, proportion) 
+
+# count words per session df
+beck_session_words <- beck_both_bind %>%
+  count(session, word, sort = TRUE)
+
+# calculate total words per session
+beck_total_words <- beck_session_words %>%
+  group_by(session) %>%
+  summarize(total = sum(n))
+
+beck_session_words <- left_join(beck_session_words, beck_total_words) %>%
+  mutate(tf = n/total)
+
+# convert session to factor
+beck_session_words$session <- as.factor(beck_session_words$session)
+```
+
+```{r calculate tf-idf}
+  # to calculate tf-idf we need a tidy text dataset with columns for session 
+    # (each document in the corpus), words (units per document) and count of words.
+
+# calculate tf-idf and arrange in descending value
+beck_session_words <- beck_session_words %>%
+  mutate(session_number = str_extract(session, "\\d+") %>% as.numeric())
+         
+beck_tfidf_words <- beck_session_words %>%
+  bind_tf_idf(word, session, n) %>%
+  arrange(desc(tf_idf))
+
+# visualize high tf-idf words
+beck_tfidf_plot_data <- beck_tfidf_words %>%
+  arrange(desc(tf_idf)) %>%
+  # this step ensures that words are treated as factor levels (ranked), 
+     # otherwise ggplot graphs them in alphabetical order
+  mutate( word = factor(word, levels = rev(unique(word)))) %>%
+  group_by(session) %>%
+  top_n(15) %>%
+  ungroup()
+
+beck_tfidf_plot_data %>%
+  ggplot(aes(word, tf_idf, fill = session)) +
+  geom_col(show.legend = FALSE) +
+  labs( x = NULL, y = "tf-idf") +
+  facet_wrap(~session_number, ncol = 2, scales = "free") +
+  coord_flip() +
+  ylim(0,0.03) +
+  ggtitle("Top TF-IDF terms per session") +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"), # Center and bold title
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12)
+  )
+```
+
+## LEVEL TWO - SENTIMENT ANALYSIS ----------------------------------------------
+
+### Non-negation-corrected sentiment analysis
+```{r re-load transcript}
+# Reading-in and cleaning file(s)
+beck_session2 <- pdf_text("Beck institute-Session-2-Annotated-Transcript.pdf")
+
+# select dialogue only
+subset_beck_sess2 <- sub("^.*?(Judith:)", "Judith:", beck_session2)
+
+# collapse text into one
+beck_session2_text <- paste(subset_beck_sess2, collapse = "\n")
+```
+
+```{r sentiment-specific cleaning function}
+# tokenize line-numbered text
+sent_tokens <- function(sess_text, custom_stop_words, freq_thresh){
+  # Tokenization
+  # convert to tokens
+  token <- sess_text %>%
+    unnest_tokens(word, value)
+  
+  # adds custom stop-words to stop-word lexicon
+  stop_words <- rbind(stop_words, data.frame(word = custom_stop_words, lexicon = "custom"))
+  
+  # removes words in stop-word lexicon
+  toks <- token %>%
+    anti_join(stop_words, by = "word")
+  
+  # lemmatization
+  # uses hash_lemmas lexicon to lemmatize the tokens
+  lem <- toks %>%
+    mutate(word = lemmatize_strings(word, dictionary = lexicon::hash_lemmas))
+  
+  # rare word removal
+  # Add row number to preserve order
+  lem <- lem %>%
+    mutate(row_num = row_number())
+  
+  # count n words
+  lemma_count <- lem %>%
+    count(word)
+  
+  # filter words with count less than threshold
+  cl_toks <- lem %>%
+    inner_join(lemma_count %>% filter(n > freq_thresh), by = "word") %>%
+    arrange(row_num) %>%
+    dplyr::select(-row_num, -n)
+  
+  return(cl_toks)
+}
+```
+
+```{r clean line-numbered text}
+# sentiment-specific cleaning for separating into lines
+beck2clean <- beck_session2_text %>%
+    replace_contraction() %>%
+    str_replace_all("\\[[^\\]]*\\]", "") %>%
+    str_replace_all("(^|\\s)(Judith:|Abe:)", "") %>%
+    str_replace_all("\\s+[A-Z]{2,}(\\s+[A-Z]{2,})+\\s", "") %>%
+    str_replace_all("\\([^\\)]*\\)", "") %>%
+    str_replace_all("[0-9]", "") %>%
+    str_replace_all(" +", " ") %>%
+    str_replace_all("[[:punct:]]", " ") %>%
+    str_split(pattern = "\\n+") %>%
+    unlist() %>%
+    trimws() %>%    # Trim whitespace from each line
+    .[nzchar(.)] %>% 
+    as_tibble() %>%
+    mutate(line = row_number())
+
+# apply sentiment-specific pre-processingfunction
+sent_tokenized <- sent_tokens(beck2clean, custom_stop_words = custom_stop_words, freq_thresh = 3)
+```
+
+```{r raw non-corrected sentiment scores}
+beck_s2_sent <- sent_tokenized %>%
+  inner_join(get_sentiments(lexicon = "afinn"), by = "word") %>%
+  group_by(index = line %/% 20) %>%
+  summarise(sentiment = sum(value, na.rm = TRUE)) 
+
+beck_s2_sent <- beck_s2_sent %>%
+  mutate(tot_sent = as.factor(ifelse(sentiment > 0, "positive", "negative")))
+
+becks2_sent_plot <- ggplot(beck_s2_sent, aes(index, sentiment)) +
+  geom_point(aes(col = tot_sent), size=2) + 
+  geom_line(data = beck_s2_sent, aes(index, sentiment), size = 0.5) +
+  scale_color_manual(values = c("negative" = "red", "positive" = "green")) +
+  theme_bw() +
+  geom_vline(xintercept = 0, color = "black", size=0.3) +
+  geom_hline(yintercept = 0, color = "black", size=0.3) +
+  labs( title = "Example case sentiment scores per 20 line section",
+        x = "Section",
+        y = "Total sentiment score",
+        color = "Total sentiment") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 11))
+becks2_sent_plot
+```
+
+### Negation corrected sentiment analysis
+```{r negation-corrected sent function}
+# negation correcting on bigrams function
+neg_corrected_sent <- function(negations, text, index_n, stop_words){
+  # make into bigrams
+  bigrams_text <- text %>%
+    unnest_tokens(bigram, value, token = "ngrams", n = 2)
+  
+  # separate them
+  bigram_sep <- bigrams_text %>%
+    separate(bigram, c("word1", "word2"), sep = " ")
+  
+  # filter bigrams where word1 is a negation word
+  negationb <- bigram_sep %>%
+    filter(word1 %in% negations) %>%
+    inner_join(get_sentiments(lexicon = "afinn"), by = c(word2 = "word")) %>%
+    mutate(value = value * -1) %>% 
+    unite(bigram, word1, word2, sep = " ") %>%
+    mutate(word = bigram) %>%
+    select(-bigram)
+  
+  # filter all rows with non-negation word 1 bigrams, make unique words again, then score sentiment
+  unique <- bigram_sep %>%
+    filter(!word1 %in% negations) %>%
+    inner_join(get_sentiments(lexicon = "afinn"), by = c(word2 = "word")) %>%
+    select(-word1) %>%
+    filter(!word2 %in% stop_words$word) %>%
+    filter(!word2 %in% negations) %>%
+    mutate(word = word2) %>%
+    select(-word2)
+  
+  # join back all words
+  comb <- bind_rows(negationb, unique) %>%
+    arrange(line)
+  
+  return(comb)
+}
+
+custom_stop_words <- c("hum", "mm", "hm", "um", "hmm", "mhm", "ive", "didnt", "uh", "yep", "yea", "yeah","youre", "shes", "uhhuh", "doesnt", "im", "hes", "weve", "wasnt", "theyre", "didnt",  "mmhmm", "blah")
+
+stop_words <- rbind(stop_words, data.frame(word = custom_stop_words, lexicon = "custom"))
+
+negations <- c("no", "not", "never", "none", "neither", "nobody", "nothing", "nowhere", "hardly", "scarcely", "barely", "without", "except", "fail", "seldom")
+stop_words2 <- stop_words %>%
+  filter(!word %in% negations)
+```
+
+```{r sentiment-specific neg-corrected cleaning function}
+beck2clean <- beck_session2_text %>%
+    replace_contraction() %>%
+    str_replace_all("\\[[^\\]]*\\]", "") %>%
+    str_replace_all("(^|\\s)(Judith:|Abe:)", "") %>%
+    str_replace_all("\\s+[A-Z]{2,}(\\s+[A-Z]{2,})+\\s", "") %>%
+    str_replace_all("\\([^\\)]*\\)", "") %>%
+    str_replace_all("[0-9]", "") %>%
+    str_replace_all(" +", " ") %>%
+    str_replace_all("[[:punct:]]", " ") %>%
+    str_split(pattern = "\\n+") %>%
+    #str_replace_all("\\\\", "") %>%
+    unlist() %>%
+    trimws() %>%    # Trim whitespace from each line
+    .[nzchar(.)] %>% 
+    as_tibble() %>%
+    mutate(line = row_number())
+
+beck_neg <- neg_corrected_sent(negations, beck2clean, index_n = 10, stop_words = stop_words2)
+```
+
+## Negation-corrected raw sentiment analysis scores
+```{r neg corrected raw sentiment scores}
+beck_s2_sent <- beck_neg %>%
+  inner_join(get_sentiments(lexicon = "afinn"), by = "word") %>%
+  select(-value.x) %>%                  # drop the left-hand one
+  rename(value = value.y) %>%
+  group_by(index = line %/% 10) %>%
+  summarise(sentiment = sum(value, na.rm = TRUE)) 
+
+beck_s2_sent <- beck_s2_sent %>%
+  mutate(tot_sent = as.factor(ifelse(sentiment > 0, "positive", "negative")))
+
+becks2_sent_plot <- ggplot(beck_s2_sent, aes(index, sentiment)) +
+  geom_point(aes(col = tot_sent), size=2) + 
+  geom_line(data = beck_s2_sent, aes(index, sentiment), size = 0.5) +
+  scale_color_manual(values = c("negative" = "red", "positive" = "green")) +
+  theme_bw() +
+  geom_vline(xintercept = 0, color = "black", size=0.3) +
+  geom_hline(yintercept = 0, color = "black", size=0.3) +
+  labs( title = "Example case sentiment scores for session two",
+        x = "Section",
+        y = "Net sentiment score",
+        color = "Total sentiment") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 12))
+becks2_sent_plot
+```
+
+## GAM-smoothed sentiment analysis scores
+```{r}
+# GAM-model for obtaining smoothed signal
+beck2_gam_neg <- gam(sentiment ~ s(index), data = beck_s2_sent)
+index_seq <- seq(min(beck_s2_sent$index),
+                 max(beck_s2_sent$index),
+                 length.out = 500)
+
+# Create new data for prediction
+new_data <- data.frame(index = index_seq)
+
+# Predict using the GAM model
+smoothed_preds <- predict(beck2_gam_neg, newdata = new_data)
+plot(index_seq, smoothed_preds, type = "l",
+     xlab = "Section", ylab = "Net sentiment score",
+     main = "", ylim = c(-15, 10))
+
+abline(h = 0, col = "black", lty = 2)
+title("Beck and Abe GAM model-smoothed sentiment scores for session two", font.main = 2)
+```
+
+## LEVEL THREE - PMI VECTORS, DOT PRODUCTS AND SUMMARY STATISTICS ---------------
+```{r re-load PMI matrices}
+# load pre-saved PMI values
+beck2_pmi <- read.csv("beck2_pmi_COR.csv")
+beck10_pmi <- read.csv("beck10_pmi_COR.csv")
+
+beck2_names <- colnames(beck2_pmi[,-1])
+beck10_names <- colnames(beck10_pmi[,-1])
+
+# turn pmi into matrix
+beck2_pmi_matrix <- as.matrix(beck2_pmi[,-1])
+beck10_pmi_matrix <- as.matrix(beck10_pmi[,-1])
+
+beck2_pmi$word <- beck2_names
+beck10_pmi$word <- beck10_names
+```
+
+## Conceptual space plot 1 feel vs. depress
+```{r con sp plot feel vs. depress Beck s2}
+# Toy example for 'feel' and 'depress'
+ggplot(beck2_pmi, aes( x = depress, y = feel)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black") +  # Add horizontal line at y = 0
+  geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dotted", color = "black") +
+  xlim(0,7) +
+  ylim(0,7) +
+  xlab("Depress") +
+  ylab("Feel") +
+  ggtitle("Conceptual space plot words 'feel' and 'depress'") +
+  geom_text(aes(label = word), check_overlap = TRUE, size = 4.5, vjust = -0.6, hjust = -0.1) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),  # Center & bold title
+    axis.title = element_text(size = 12),  # Increase axis labels
+    axis.text = element_text(size = 11)  # Increase tick mark labels
+  ) + theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+```{r conceptual space plots conecutive sessions 2-10}
+# conceptual space plt talf vs. feel Beck and Abe session 2
+talk_feel_beck2 <- ggplot(beck2_pmi, aes( x = talk, y = feel)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black") +  # Add horizontal line at y = 0
+  geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dotted", color = "black") +
+  xlim(0,7) +
+  ylim(0,7) +
+  xlab("Talk") +
+  ylab("Feel") +
+  ggtitle("Conceptual space plot for Session 2 words 'talk' and 'feel'") +
+  geom_text(aes(label = word), check_overlap = TRUE, size = 3, vjust = -0.6, hjust = -0.3) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 11),  # Center & bold title
+    axis.title = element_text(size = 12),  # Increase axis labels
+    axis.text = element_text(size = 11)  # Increase tick mark labels
+  ) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+
+# conceptual space plt talf vs. feel Beck and Abe session 10
+talk_feel_beck10 <- ggplot(beck10_pmi, aes( x = talk, y = feel)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black") +  # Add horizontal line at y = 0
+  geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dotted", color = "black") +
+  xlim(0,7) +
+  ylim(0,7) +
+  xlab("Talk") +
+  ylab("Feel") +
+  ggtitle("Conceptual space plot for Session 10 words 'talk' and 'feel'") +
+  geom_text(aes(label = word), check_overlap = TRUE, size = 3, vjust = -0.6, hjust = -0.1) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 11),  # Center & bold title
+    axis.title = element_text(size = 12),  # Increase axis labels
+    axis.text = element_text(size = 11)  # Increase tick mark labels
+  ) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+
+# calculate dot products
+dp_b2 <- sum(beck2_pmi[,"talk"] * beck2_pmi_val[,"feel"])
+dp_b10 <- sum(beck10_pmi_val[,"talk"] * beck10_pmi_val[,"feel"])
+print(paste0("Dot product for Beck session 2 word pair talk vs. feel is: ", dp_b2))
+print(paste0("Dot product for Beck session 10 word pair talk vs. feel is: ", dp_b10))
+
+# arrange both plots in panel
+feel_talk_comp <- grid.arrange(talk_feel_beck2, talk_feel_beck10, ncol = 2)
+feel_talk_comp
+```
+
+## Statistical summary of dot products
+
+# Calculating average dps ------------------------------------------------------
+```{r dp calculation session 2}
+# Creating a dot product matrix comparison between pairs of words for Session 2
+beck2_dp_matrix <- matrix(NA, nrow = (nrow(beck2_pmi_matrix)^2), ncol = 4)
+
+vocab <- colnames(beck2_pmi_matrix)
+rowN <- 1
+for(v in vocab){
+
+  for (w in vocab){
+    # first word in pair
+    beck2_dp_matrix[rowN,1] <- v
+    # second word in pair
+    beck2_dp_matrix[rowN,2] <- w
+    
+    # calculate 'pure' dot product
+    dp <- sum(beck2_pmi_matrix[,v] * beck2_pmi_matrix[,w])
+      
+    # calculate absolute numbers dot product
+    abs_dp <- sum(abs(beck2_pmi_matrix[,v]) * abs(beck2_pmi_matrix[,w]))
+    
+    # if absolute dp is zero skip this pair (it means there is no relationship at all)
+    if(abs_dp == 0){
+      next
+    }
+    else{
+      beck2_dp_matrix[rowN,3] <- dp
+      beck2_dp_matrix[rowN,4] <- abs_dp
+    }
+    # update row value
+    rowN <- rowN + 1
+  }
+}
+beck2_dp_matrix <- na.omit(beck2_dp_matrix)
+colnames(beck2_dp_matrix) <- c("word1", "word2", "dp", "abs_dp")
+```
+
+```{r dp calculation session 10}
+# apply same procedure to session 10 but ommit rows with both zero dot products
+beck10_dp_matrix <- matrix(NA, nrow = (nrow(beck10_pmi_matrix)^2), ncol = 4)
+
+vocab <- colnames(beck10_pmi_matrix)
+rowN <- 1
+for(v in vocab){
+
+  for (w in vocab){
+    # first word in pair
+    beck10_dp_matrix[rowN,1] <- v
+    # second word in pair
+    beck10_dp_matrix[rowN,2] <- w
+    
+    # calculate 'pure' dot product
+    dp <- sum(beck10_pmi_matrix[,v] * beck10_pmi_matrix[,w])
+    
+    # calculate absolute numbers dot product
+    abs_dp <- sum(abs(beck10_pmi_matrix[,v]) * abs(beck10_pmi_matrix[,w]))
+    
+    if(dp == 0 && abs_dp == 0){
+      next
+    }
+    else{
+      beck10_dp_matrix[rowN,3] <- dp
+      beck10_dp_matrix[rowN,4] <- abs_dp
+      # update row value
+    rowN <- rowN + 1
+    }
+  }
+}
+beck10_dp_matrix <- na.omit(beck10_dp_matrix)
+colnames(beck10_dp_matrix) <- c("word1", "word2", "dp", "abs_dp")
+```
+
+```{r average dp}
+# Beck session 2 - calculating average and variance
+beck2_dp <- as.data.frame(beck2_dp_matrix)
+
+# make numeric
+beck2_dp <- beck2_dp %>%
+  mutate(dp = as.numeric(dp)) %>%
+  mutate(abs_dp = as.numeric(abs_dp))
+
+# separate positive and negative dp
+beck2_dp_pos <- beck2_dp %>%
+  filter(dp > 0)
+beck2_dp_neg <- beck2_dp %>%
+  filter(dp < 0)
+
+# create data frame with averages per dp
+beck2_mean_dp_df <- data_frame(mean_dp = mean(beck2_dp$dp), 
+                               var_dp = var(beck2_dp$dp), 
+                               mean_pos_dp = mean(beck2_dp_pos$dp), 
+                               var_pos_dp = var(beck2_dp_pos$dp), 
+                               mean_neg_dp = mean(beck2_dp_neg$dp), 
+                               var_neg_dp = var(beck2_dp_neg$dp), 
+                               mean_abs_dp = mean(beck2_dp$abs_dp), 
+                               var_abs_dp = var(beck2_dp$abs_dp))
+
+# Beck session 10 - calculating average and variance
+beck10_dp <- as.data.frame(beck10_dp_matrix)
+
+# make numeric
+beck10_dp <- beck10_dp %>%
+  mutate(dp = as.numeric(dp)) %>%
+  mutate(abs_dp = as.numeric(abs_dp))
+
+# separate positive and negative dp
+beck10_dp_pos <- beck10_dp %>%
+  filter(dp > 0)
+beck10_dp_neg <- beck10_dp %>%
+  filter(dp < 0)
+
+# create data frame with averages per dp
+beck10_mean_dp_df <- data_frame(mean_dp = mean(beck10_dp$dp), 
+                                var_dp = var(beck10_dp$dp),
+                                mean_pos_dp = mean(beck10_dp_pos$dp), 
+                                var_pos_dp = var(beck10_dp_pos$dp), 
+                                mean_neg_dp = mean(beck10_dp_neg$dp), 
+                                var_neg_dp = var(beck10_dp_neg$dp),
+                                mean_abs_dp = mean(beck10_dp$abs_dp), 
+                                var_abs_dp = var(beck10_dp$abs_dp))
+
+both_mean_dp <- rbind(beck2_mean_dp_df, beck10_mean_dp_df)
+rownames(both_mean_dp) <- c("Session 2", "Session 10")
+
+# Make session a factor
+both_mean_dp <- both_mean_dp %>%
+  mutate(Session = as.factor(c(2,10)))
+```
+
+# Plot mean dp vs. variance dp -------------------------------------------------
+```{r}
+# Plot of mean dot product by session
+ggplot(both_mean_dp, aes(x = mean_dp, y = var_dp, col = Session)) +
+  geom_point(size = 2.5) + 
+  ggtitle("Summary of dot product per session for the case of Abe") + 
+  xlab("Mean") + 
+  ylab("Variance") + 
+  xlim(100,300) +
+  ylim(5000,15000) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 10),
+      legend.position = "bottom") +
+  scale_color_manual(values = c("cornflowerblue", "blue"))
+```
+
+# Adding CV plot 
+```{r}
+# adding a coefficient of variation column
+both_mean_dp <- both_mean_dp %>%
+  mutate(coef_var = (sqrt(var_dp))/mean_dp) %>%
+  mutate(Session = as.factor(Session))
+
+cv_Beck2_10 <- ggplot(both_mean_dp, aes(x = Session, y = coef_var, col = Session, group = 1)) + 
+  ggtitle("Coefficient of variation per session for the case of Abe") +
+  geom_point(size = 3.5) + theme_bw() +
+  geom_line(size = 0.4, color = "black", alpha = 0.5) + 
+  ylab("Coefficient of variation") + 
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 11), 
+        legend.position = "bottom") +
+  scale_color_manual(values = c("grey","#404040")) + ylim(0,0.5)
+cv_Beck2_10
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

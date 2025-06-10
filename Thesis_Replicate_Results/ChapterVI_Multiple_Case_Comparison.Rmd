@@ -1,0 +1,628 @@
+---
+title: "ChapterVI_Multiple_Case_Comparison"
+author: "Yael Gutman"
+date: "`r Sys.Date()`"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load libraries}
+# load libraries
+library(dplyr)
+library(tidyr)
+library(text2vec)
+library(tidyverse)
+library(tidytext)
+library(ggplot2)
+library(tm)
+library(stringr)
+library(pdftools)
+library(readr)
+library(textstem)
+library(textclean)
+library(lexicon)
+library(Matrix)
+library(proxy)
+library(mgcv)
+library(gridExtra)
+library(patchwork)
+```
+
+# LEVEL ONE --------------------------------------------------------------------
+```{r tf-idf function}
+# function to generate tf-idf values
+tfidf_top_low_func <- function(client_tok_list){
+  # create df to display tf-idf per session
+  sess_bind <- data_frame(word = c(), session = c())
+  
+  for(s in 1:length(client_tok_list)){
+    sess <- client_tok_list[[s]]
+    sess <- sess %>%
+      mutate(session = paste0("Session_", s))
+    sess_bind <- rbind(sess_bind, sess)
+  }
+  
+  # count per token per session
+  sess_bind <- sess_bind %>%
+    count(session, word, sort = TRUE)
+
+  # calculate total words (token sample size) per session
+  total_words <- sess_bind  %>%
+    group_by(session) %>%
+    summarize(total = sum(n))
+
+  # join total column to df and create tf by dividing token n by total sample size
+  session_words2 <- left_join(sess_bind, total_words) %>%
+    mutate(tf = n/total)
+
+  # convert session to factor
+  session_words2$session <- as.factor(session_words2$session)
+
+  # calculate tf-idf and arrange in descending value
+  session_words2 <- session_words2 %>%
+    mutate(session_number = str_extract(session, "\\d+") %>% as.numeric())
+         
+  tfidf_words <- session_words2 %>%
+    bind_tf_idf(word, session, n) %>%
+    arrange(desc(tf_idf))
+  return(tfidf_words)
+}
+```
+
+```{r tf-idf modified function}
+# function to generate the (highest) tf-idf plots
+tfidf_plots <- function(sess_vector, tf_idf_df, max_y){
+  sess_tfidf <- tf_idf_df %>%
+  filter(session_number %in% sess_vector)
+
+# visualize tf-idf words
+tfidf_plot <- sess_tfidf %>%
+  group_by(session) %>%
+  arrange(desc(tf_idf)) %>%
+  slice_head(n = 15) %>%
+    ungroup() %>%
+  mutate(word = reorder_within(word, tf_idf, session)) %>% 
+  ggplot(aes(word, tf_idf, fill = session)) +
+  ylim(0, max_y) +
+  geom_col(show.legend = FALSE) +
+  scale_x_reordered(name = NULL) +  
+  labs(x = NULL, y = "tf-idf") +
+  facet_wrap(~session_number, ncol = 3, scales = "free") +
+  coord_flip() +
+  ggtitle("Sessions with top 15 TF-IDF terms") +
+  theme(
+    #    plot.title = element_text(hjust = 0.5, size = 11, face = "bold"), # Center and bold title
+    plot.title = element_text(hjust = 0.5, size = 11), # Center and bold title
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12)
+  ) 
+return(tfidf_plot)
+}
+```
+
+```{r highest TFIDF plots}
+# client list of names
+clients <- c("RY", "M", "SR", "JU", "SRH", "SZ")
+high_sess <- c(11, 20, 8, 37, 10, 20)
+high_cases_plots <- list()
+
+for(c in 1:length(clients)){
+  sess <- high_sess[c]
+  cl_name <- clients[c]
+  client_toks_list <- readRDS(paste0("ChapterVI_", cl_name, "_toks_list.rds"))
+  tf_idf_df <- tfidf_top_low_func(client_toks_list)
+  tfidfplot <- tfidf_plots(sess, tf_idf_df, max_y = 0.3)
+  ggtitle_client <- paste0("Client ", c, " session ", high_sess[c])
+  high_cases_plots[[c]] <- tfidfplot + 
+    ggtitle(ggtitle_client) + geom_col(fill = "orange")
+}
+
+# Assuming tfidf_plots is your list of ggplots
+tfidf_combined_plot <- wrap_plots(high_cases_plots, ncol = 3)  # Change ncol as needed
+tfidf_combined_plot <- tfidf_combined_plot + plot_annotation(
+  title = "Highest TF-IDF-value session for six example client cases",
+  theme = theme(plot.title = element_text(size = 13, face = "bold", hjust = 0.5))
+)
+tfidf_combined_plot
+```
+
+```{r lowest TFIDF plots}
+# client list of names
+clients <- c("RY", "M", "SR", "JU", "SRH", "SZ")
+low_sess <- c(16, 28, 13, 16, 6, 10)
+low_cases_plots <- list()
+
+for(c in 1:length(clients)){
+  sess <- low_sess[c]
+  cl_name <- clients[c]
+  client_toks_list <- readRDS(paste0("ChapterVI_", cl_name, "_toks_list.rds"))
+  tf_idf_df <-  tfidf_top_low_func(client_toks_list)
+  tfidfplot <- tfidf_plots(sess, tf_idf_df, max_y = 0.3)
+  ggtitle_client <- paste0("Client ", c, " session ", low_sess[c])
+  low_cases_plots[[c]] <- tfidfplot + 
+    ggtitle(ggtitle_client) + geom_col(fill = "yellowgreen")
+}
+
+# Assuming tfidf_plots is your list of ggplots
+tfidf_low_combined_plot <- wrap_plots(low_cases_plots, ncol = 3)  # Change ncol as needed
+tfidf_low_combined_plot <- tfidf_low_combined_plot + plot_annotation(
+  title = "Lowest TF-IDF-value session for six example client cases",
+  theme = theme(plot.title = element_text(size = 13, face = "bold", hjust = 0.5))
+)
+tfidf_low_combined_plot
+```
+
+# LEVEL TWO --------------------------------------------------------------------
+```{r re-load sent scores list}
+clientRY_sent_score_list <- readRDS("ChapterV_sent_scores_list.rds")
+clientRY_sent_score_list[[1]]
+```
+
+```{r sentiment plots functions}
+# function to calculate sentiment total score per session
+sent_score_sess <- function(session_tokens, ind_n){
+  sent_scores <- session_tokens %>%
+    group_by(index = line %/% ind_n) %>%
+    summarise(sentiment = sum(value, na.rm = TRUE))
+}
+
+total_sent_scores <- function(client_sent_score_list, ind_n){
+  # loop to fill with total sentiment scores
+  client_total_sent_scores <- list()
+  total_sents_all <- c()
+
+  for(s in 1:length(client_sent_score_list)){
+    client_sess_toks <- as.data.frame(client_sent_score_list[s])
+    client_sess_sent <- sent_score_sess(client_sess_toks, ind_n)
+    client_total_sent_scores[[s]] <- client_sess_sent
+    total_sents_all[s] <- sum(client_sess_sent$sentiment)
+  }
+  return(total_sents_all)
+}
+
+# gam-smoothed sentiment plotting function
+sent_gam_func <- function(total_sents_all, cl_name, nsess){
+  
+  # create dataframe to store total sentiment scores
+  client_total_sent_df <- data.frame(session = c(1:nsess), 
+                                    total_sent = total_sents_all)
+
+  # classify score as either positive or negative
+  client_total_sent_df <- client_total_sent_df %>%
+      mutate(sentiment = as.factor(ifelse(total_sent > 0, "positive", "negative")))
+
+  client_gam <-  gam(total_sent ~ s(session), data = client_total_sent_df)
+  return(client_gam)
+}
+```
+
+```{r loop to generate gam models per client}
+clients_gams <- list()
+clients <- c("RY", "M", "SR", "JU", "SRH", "SZ")
+cls_n_sess <- c(56, 36, 18, 57, 11, 24)
+for(c in 1:length(clients)){
+  cl_name <- clients[c]
+  nsess <- cls_n_sess[c]
+  client_sent_score_list <- readRDS(paste0("ChapterVI_", cl_name,"_sent_scores_list.rds"))
+  tot_sent_scores <- total_sent_scores(client_sent_score_list, ind_n = 20)
+  cl_gam <- sent_gam_func(tot_sent_scores, cl_name, nsess)
+  clients_gams[[c]] <- cl_gam
+}
+```
+
+```{r GAM panel plot}
+gam_models <- clients_gams
+gam_titles <- c("Client 1", "Client 2", "Client 3", "Client 4", "Client 5", "Client 6")
+
+# Set up panel layout: 1 row, 3 columns (adjust as needed)
+par(mfrow = c(1, 2),  # or c(2, 2) for 4 plots etc.
+    oma = c(4, 2, 7, 1),  # outer margins: bottom, left, top, right
+    mar = c(6, 5, 2, 2))  # inner margins per plot
+
+# Loop through each GAM and plot
+for (c in seq_along(gam_models)) {
+  gam_model <- gam_models[[c]]
+  df <- gam_model$model  # original data used in the GAM
+  pred <- predict(gam_model)
+    # Plot predicted values
+  plot(df$session, pred, type = "l", 
+       xlab = "Session", ylab = "Net sentiment score", 
+       main = "", ylim = c(-300, 130))
+  
+  abline(h = 0, col = "black", lty = 2)
+  title(gam_titles[c], font.main = 1)
+}
+
+# Add a general title
+mtext("GAM smoothed sentiment analysis by session per case", outer = TRUE, cex = 0.9, font = 2, line = 1)
+```
+
+# LEVEL THREE --------------------------------------------------------------------
+```{r highest dp function}
+# function to extract highest dp and generate conceptual space plot
+high_dp_func <- function(PMI_list, dp_list, s_num, xylim){
+  
+  # extract dps for specified session and vocab list
+  client_dps_s <- dp_list[[1]][[s_num]] %>%
+  arrange(desc(dp))
+  client_vocab_s <- dp_list[[2]][[s_num]]
+  
+  # extract word pair with highest dp 
+  word1 <- client_dps_s[1,1]
+  word2 <- client_dps_s[1,2]
+  
+  # PMI of specified session
+  client_PMI_s <- PMI_list[[s_num]]
+  client_PMI_s$word <-  client_vocab_s
+  
+  # conceptual space plot
+  client_conc_plot <- ggplot(client_PMI_s, aes(x = .data[[word1]], y = .data[[word2]])) +
+    geom_point() +
+    geom_hline(yintercept = 0, linetype = "solid", color = "black") +  # Add horizontal line at y = 0
+    geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+    geom_abline(slope = 1, intercept = 0, linetype = "dotted", color = "black") +
+    xlim(0,xylim) +
+    ylim(-1.5,xylim) +
+    xlab(word1) +
+    ylab(word2) +
+    ggtitle("Conceptual space plot for highest dot product of the highest TF-IDF session") +
+     theme_bw() +
+    theme(plot.title = element_text(hjust = 0.5, size = 13)) +
+      geom_text(aes(label = word), check_overlap = TRUE, size = 2.5, hjust = 0.5, vjust = -0.7) 
+  return(client_conc_plot)
+}
+```
+
+## conceptual space plots panel 
+```{r cs plot client 1}
+clientRY_PMI_list <- readRDS("ChapterVI_RY_PMI_list.rds")
+clientRY_dp_list <- readRDS("ChapterVI_RY_dp_list.rds")
+clientRY_csplot <- high_dp_func(clientRY_PMI_list, clientRY_dp_list, 11, 7)
+clientRY_csplot
+```
+
+```{r cs plot client 2}
+clientM_PMI_list <- readRDS("ChapterVI_M_PMI_list.rds")
+clientM_dp_list <- readRDS("ChapterVI_M_dp_list.rds")
+clientM_csplot <- high_dp_func(clientM_PMI_list, clientM_dp_list, 20, 7)
+```
+
+```{r cs plot client 3}
+clientSR_PMI_list <- readRDS("ChapterVI_SR_PMI_list.rds")
+clientSR_dp_list <- readRDS("ChapterVI_SR_dp_list.rds")
+clientSR_csplot <- high_dp_func(clientSR_PMI_list, clientSR_dp_list, 8, 7)
+clientSR_csplot
+```
+
+```{r cs plot client 4}
+clientJU_PMI_list <- readRDS("ChapterVI_JU_PMI_list.rds")
+clientJU_dp_list <- readRDS("ChapterVI_JU_dp_list.rds")
+clientJU_csplot <- high_dp_func(clientJU_PMI_list, clientJU_dp_list, 37, 7)
+clientJU_csplot
+```
+
+```{r cs plot client 5}
+clientSRH_PMI_list <- readRDS("ChapterVI_SRH_PMI_list.rds")
+clientSRH_dp_list <- readRDS("ChapterVI_SRH_dp_list.rds")
+clientSRH_csplot <- high_dp_func(clientSRH_PMI_list, clientSRH_dp_list, 10, 7)
+clientSRH_csplot 
+```
+
+```{r cs plot client 6}
+clientSZ_PMI_list <- readRDS("ChapterVI_SZ_PMI_list.rds")
+clientSZ_dp_list <- readRDS("ChapterVI_SZ_dp_list.rds")
+clientSZ_csplot <- high_dp_func(clientSZ_PMI_list, clientSZ_dp_list, 20, 7)
+clientSZ_csplot
+```
+
+```{r level three panel plot}
+# conceptual space panel plot
+clientRY_csplot <- clientRY_csplot + ggtitle("Client 1 session 11") + 
+  theme(plot.title = element_text(size = 11, face = "plain", hjust = 0.5))
+clientM_csplot <- clientM_csplot + ggtitle("Client 2 session 20") + 
+  theme(plot.title = element_text(size = 11, face = "plain", hjust = 0.5))
+clientSR_csplot <- clientSR_csplot + ggtitle("Client 3 session 8") + 
+  theme(plot.title = element_text(size = 11, face = "plain", hjust = 0.5))
+clientJU_csplot <- clientJU_csplot + ggtitle("Client 4 session 37") + 
+  theme(plot.title = element_text(size = 11, face = "plain", hjust = 0.5))
+clientSRH_csplot <- clientSRH_csplot + ggtitle("Client 5 session 10") + 
+  theme(plot.title = element_text(size = 11, face = "plain", hjust = 0.5))
+clientSZ_csplot <- clientSZ_csplot + ggtitle("Client 6 session 20") + 
+  theme(plot.title = element_text(size = 11, face = "plain", hjust = 0.5))
+
+concep_plots <- list(clientRY_csplot, clientM_csplot, clientSR_csplot, 
+                     clientJU_csplot, clientSRH_csplot, clientSZ_csplot)
+
+# Add margin space to each individual plot
+concep_plots <- lapply(concep_plots, function(p) {
+  p + theme(
+    plot.margin = margin(t = 15, r = 5, b = 5, l = 5)  # Increase top margin (t)
+  )
+})
+
+# combined conceptual space plots
+concep_combined_plot <- wrap_plots(concep_plots, ncol = 2)  # Change ncol as needed
+concep_combined_plot <- concep_combined_plot + plot_annotation(
+  title = "Conceptual space plot for highest TF-IDF session per case",
+  theme = theme(plot.title = element_text(size = 13, face = "bold", hjust = 0.5))
+)
+concep_combined_plot
+```
+
+
+## mean vs. var panel plot
+```{r dp summary functions}
+# function to create a df summarizing dot products for a session
+dp_df_func <- function(client_dp_list, max_sess){
+  client_dp_all <- client_dp_list$dp_list
+  client_dp_vocab <- client_dp_list$vocab
+  
+  client_vals_df <- data.frame(session = c(1:max_sess), mean = NA, var = NA)
+  for(s in 1:length(client_dp_all)){
+    data <- client_dp_all[[s]]
+    client_vals_df[s,2] <- mean(data$dp)
+    client_vals_df[s,3] <- var(data$dp)
+  }
+  
+  # adding a coefficient of variation column
+  client_sd <- sqrt(client_vals_df$var)
+  client_vals_df <- client_vals_df %>%
+    mutate(var_coeff = client_sd/client_vals_df$mean)
+  return(client_vals_df)
+} 
+
+# function to generate mean vs. var plot
+dp_mean_var_plot <- function(client_vals_df, xlimm, ylimm){
+  
+  #calculate mean per means and variance
+  mean_means <- mean(client_vals_df$mean)
+  mean_vars <- mean(client_vals_df$var)
+  
+  # add line for session 1 variance 
+  sess1_var <- client_vals_df[1,3]
+  
+  # Added lines plot 1
+  mean_var_plot <- ggplot(client_vals_df, aes( x = mean, y = var, col = as.numeric(factor(session)))) +
+    geom_point(size = 4) + 
+    ggtitle("Client dot product mean and variance per session") + 
+    xlab("Mean") + 
+    ylab("Variance") + 
+    xlim(xlimm) +
+    ylim(ylimm) +
+    geom_hline(yintercept=sess1_var, linetype= "dashed", color = "darkgrey", size=0.5) +
+    geom_vline(xintercept = mean_means, color = "blue", size=0.3) +
+    geom_hline(yintercept = mean_vars, color = "blue", size=0.3) +
+    geom_abline(intercept = -11500, slope = 100, color = "black", size = 0.5) +
+    scale_color_gradient(low = "lightgray", high = "purple") +
+    theme_bw() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+          legend.position = "bottom") +
+    labs(color = "Session number") +
+      geom_text(aes(label = session), check_overlap = TRUE, size = 4, hjust = 1.2, vjust = -0.5) 
+  
+  return(mean_var_plot)
+}
+```
+
+```{r mean var plot client 1}
+# calculate dot products for each session client RY
+clientRY_dp_summ <- dp_df_func(clientRY_dp_list, max_sess = 56)
+
+#calculate mean per means and variance
+mean_means_RY <- mean(clientRY_dp_summ$mean)
+mean_vars_RY <- mean(clientRY_dp_summ$var)
+  
+# add line for session 1 variance 
+sess1_var_RY <- clientRY_dp_summ[1,3]
+  
+# added lines plot 1
+clientRY_mean_var_plot <- ggplot(clientRY_dp_summ, aes( x = mean, y = var, col = as.numeric(factor(session)))) +
+    geom_point(size = 3) + 
+    ggtitle("Client RY dot product mean and variance per session") + 
+    xlab("Mean") + 
+    ylab("Variance") + 
+    xlim(100,300) +
+    ylim(0,21000) +
+    geom_hline(yintercept=sess1_var_RY, linetype= "dashed", color = "darkgrey", size=0.5) +
+    geom_vline(xintercept = mean_means_RY, color = "blue", size=0.3) +
+    geom_hline(yintercept = mean_vars_RY, color = "blue", size=0.3) +
+    geom_abline(intercept = -10000, slope = 100, color = "black", size = 0.5) +
+    scale_color_gradient(low = "lightgray", high = "purple") +
+    theme_bw() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+          legend.position = "bottom") +
+    labs(color = "Session number") +
+      geom_text(aes(label = session), check_overlap = TRUE, size = 2.5, hjust = 1.5, vjust = -0.3) 
+```
+
+```{r mean var plot client 2}
+# calculate dot products for each session client M
+clientM_dp_summ <- dp_df_func(clientM_dp_list, max_sess = 36)
+
+#calculate mean per means and variance
+mean_means_M <- mean(clientM_dp_summ$mean)
+mean_vars_M <- mean(clientM_dp_summ$var)
+  
+# add line for session 1 variance 
+sess1_var_M <- clientM_dp_summ[1,3]
+  
+# added lines plot 1
+clientM_mean_var_plot <- ggplot(clientM_dp_summ, aes( x = mean, y = var, col = as.numeric(factor(session)))) +
+    geom_point(size = 3) + 
+    ggtitle("Client M dot product mean and variance per session") + 
+    xlab("Mean") + 
+    ylab("Variance") + 
+    xlim(100,300) +
+    ylim(0,21000) +
+    geom_hline(yintercept=sess1_var_M, linetype= "dashed", color = "darkgrey", size=0.5) +
+    geom_vline(xintercept = mean_means_M, color = "blue", size=0.3) +
+    geom_hline(yintercept = mean_vars_M, color = "blue", size=0.3) +
+    geom_abline(intercept = -10000, slope = 100, color = "black", size = 0.5) +
+    scale_color_gradient(low = "lightgray", high = "purple") +
+    theme_bw() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+          legend.position = "bottom") +
+    labs(color = "Session number") +
+      geom_text(aes(label = session), check_overlap = TRUE, size = 2.5, hjust = 1.5, vjust = -0.3) 
+```
+
+```{r mean var plot client 3}
+# calculate dot products for each session client SR
+clientSR_dp_summ <- dp_df_func(clientSR_dp_list, max_sess = 18)
+
+#calculate mean per means and variance
+mean_means_SR <- mean(clientSR_dp_summ$mean)
+mean_vars_SR <- mean(clientSR_dp_summ$var)
+  
+# add line for session 1 variance 
+sess1_var_SR <- clientSR_dp_summ[1,3]
+  
+# added lines plot 1
+clientSR_mean_var_plot <- ggplot(clientSR_dp_summ, aes( x = mean, y = var, col = as.numeric(factor(session)))) +
+    geom_point(size = 3) + 
+    ggtitle("Client SR dot product mean and variance per session") + 
+    xlab("Mean") + 
+    ylab("Variance") + 
+    xlim(100,300) +
+    ylim(0,21000) +
+    geom_hline(yintercept=sess1_var_SR, linetype= "dashed", color = "darkgrey", size=0.5) +
+    geom_vline(xintercept = mean_means_SR, color = "blue", size=0.3) +
+    geom_hline(yintercept = mean_vars_SR, color = "blue", size=0.3) +
+    geom_abline(intercept = -10000, slope = 100, color = "black", size = 0.5) +
+    scale_color_gradient(low = "lightgray", high = "purple") +
+    theme_bw() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+          legend.position = "bottom") +
+    labs(color = "Session number") +
+      geom_text(aes(label = session), check_overlap = TRUE, size = 2.5, hjust = 1.5, vjust = -0.3) 
+```
+
+```{r mean var plot client 4}
+# calculate dot products for each session client JU
+clientJU_dp_summ <- dp_df_func(clientJU_dp_list, max_sess = 57)
+
+#calculate mean per means and variance
+mean_means_JU <- mean(clientJU_dp_summ$mean)
+mean_vars_JU <- mean(clientJU_dp_summ$var)
+  
+# add line for session 1 variance 
+sess1_var_JU <- clientJU_dp_summ[1,3]
+  
+# added lines plot 1
+clientJU_mean_var_plot <- ggplot(clientJU_dp_summ, aes( x = mean, y = var, col = as.numeric(factor(session)))) +
+    geom_point(size = 3) + 
+    ggtitle("Client JU dot product mean and variance per session") + 
+    xlab("Mean") + 
+    ylab("Variance") + 
+    xlim(100,300) +
+    ylim(0,21000) +
+    geom_hline(yintercept=sess1_var_JU, linetype= "dashed", color = "darkgrey", size=0.5) +
+    geom_vline(xintercept = mean_means_JU, color = "blue", size=0.3) +
+    geom_hline(yintercept = mean_vars_JU, color = "blue", size=0.3) +
+    geom_abline(intercept = -10000, slope = 100, color = "black", size = 0.5) +
+    scale_color_gradient(low = "lightgray", high = "purple") +
+    theme_bw() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+          legend.position = "bottom") +
+    labs(color = "Session number") +
+      geom_text(aes(label = session), check_overlap = TRUE, size = 2.5, hjust = 1.5, vjust = -0.3) 
+```
+
+```{r mean var plot client 5}
+# calculate dot products for each session client SRH
+clientSRH_dp_summ <- dp_df_func(clientSRH_dp_list, max_sess = 11)
+
+#calculate mean per means and variance
+mean_means_SRH <- mean(clientSRH_dp_summ$mean)
+mean_vars_SRH <- mean(clientSRH_dp_summ$var)
+  
+# add line for session 1 variance 
+sess1_var_SRH <- clientSRH_dp_summ[1,3]
+  
+# added lines plot 1
+clientSRH_mean_var_plot <- ggplot(clientSRH_dp_summ, aes( x = mean, y = var, col = as.numeric(factor(session)))) +
+    geom_point(size = 3) + 
+    ggtitle("Client SRH dot product mean and variance per session") + 
+    xlab("Mean") + 
+    ylab("Variance") + 
+    xlim(100,300) +
+    ylim(0,21000) +
+    geom_hline(yintercept=sess1_var_SRH, linetype= "dashed", color = "darkgrey", size=0.5) +
+    geom_vline(xintercept = mean_means_SRH, color = "blue", size=0.3) +
+    geom_hline(yintercept = mean_vars_SRH, color = "blue", size=0.3) +
+    geom_abline(intercept = -10000, slope = 100, color = "black", size = 0.5) +
+    scale_color_gradient(low = "lightgray", high = "purple") +
+    theme_bw() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+          legend.position = "bottom") +
+    labs(color = "Session number") +
+      geom_text(aes(label = session), check_overlap = TRUE, size = 2.5, hjust = 1.5, vjust = -0.3) 
+```
+
+```{r mean var plot client 6}
+# calculate dot products for each session client SZ
+clientSZ_dp_summ <- dp_df_func(clientSZ_dp_list, max_sess = 24)
+
+#calculate mean per means and variance
+mean_means_SZ <- mean(clientSZ_dp_summ$mean)
+mean_vars_SZ <- mean(clientSZ_dp_summ$var)
+  
+# add line for session 1 variance 
+sess1_var_SZ <- clientSZ_dp_summ[1,3]
+  
+# added lines plot 1
+clientSZ_mean_var_plot <- ggplot(clientSZ_dp_summ, aes( x = mean, y = var, col = as.numeric(factor(session)))) +
+    geom_point(size = 3) + 
+    ggtitle("Client SZ dot product mean and variance per session") + 
+    xlab("Mean") + 
+    ylab("Variance") + 
+    xlim(100,300) +
+    ylim(0,21000) +
+    geom_hline(yintercept=sess1_var_SZ, linetype= "dashed", color = "darkgrey", size=0.5) +
+    geom_vline(xintercept = mean_means_SZ, color = "blue", size=0.3) +
+    geom_hline(yintercept = mean_vars_SZ, color = "blue", size=0.3) +
+    geom_abline(intercept = -10000, slope = 100, color = "black", size = 0.5) +
+    scale_color_gradient(low = "lightgray", high = "purple") +
+    theme_bw() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+          legend.position = "bottom") +
+    labs(color = "Session number") +
+      geom_text(aes(label = session), check_overlap = TRUE, size = 2.5, hjust = 1.5, vjust = -0.3) 
+```
+
+```{r all clients mean var panel plot}
+# mean var panel plot
+clientRY_mean_var_plot <- clientRY_mean_var_plot + ggtitle("Client 1") + 
+  theme(plot.title = element_text(size = 11, face = "plain", hjust = 0.5))
+clientM_mean_var_plot <- clientM_mean_var_plot + ggtitle("Client 2") + 
+  theme(plot.title = element_text(size = 11, face = "plain", hjust = 0.5))
+clientSR_mean_var_plot <- clientSR_mean_var_plot + ggtitle("Client 3") + 
+  theme(plot.title = element_text(size = 11, face = "plain", hjust = 0.5))
+clientJU_mean_var_plot <- clientJU_mean_var_plot + ggtitle("Client 4") + 
+  theme(plot.title = element_text(size = 11, face = "plain", hjust = 0.5))
+clientSRH_mean_var_plot <- clientSRH_mean_var_plot + ggtitle("Client 5") + 
+  theme(plot.title = element_text(size = 11, face = "plain", hjust = 0.5))
+clientSZ_mean_var_plot <- clientSZ_mean_var_plot + ggtitle("Client 6") + 
+  theme(plot.title = element_text(size = 11, face = "plain", hjust = 0.5))
+
+mean_var_plots <- list(clientRY_mean_var_plot, clientM_mean_var_plot, clientSR_mean_var_plot, 
+                     clientJU_mean_var_plot, clientSRH_mean_var_plot, clientSZ_mean_var_plot)
+
+# Add margin space to each individual plot
+mean_var_plots <- lapply(mean_var_plots, function(p) {
+  p + theme(
+    plot.margin = margin(t = 15, r = 5, b = 5, l = 5)  # Increase top margin (t)
+  )
+})
+
+# combined mean var plots
+mean_var_combined_plot <- wrap_plots(mean_var_plots, ncol = 2)  # Change ncol as needed
+mean_var_combined_plot <- mean_var_combined_plot + plot_annotation(
+  title = "Mean and variance per session for six example cases",
+  theme = theme(plot.title = element_text(size = 13, face = "bold", hjust = 0.5))
+)
+mean_var_combined_plot
+```
+

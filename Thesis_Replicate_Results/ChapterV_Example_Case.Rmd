@@ -1,0 +1,583 @@
+---
+title: "ChapterV_example_case"
+author: "Yael Gutman"
+date: "`r Sys.Date()`"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load libraries}
+library(dplyr)
+library(tidyr)
+library(text2vec)
+library(tidyverse)
+library(tidytext)
+library(ggplot2)
+library(tm)
+library(stringr)
+library(pdftools)
+library(scales)
+library(reshape2)
+library(textstem)
+library(wordcloud)
+library(ggraph)
+library(widyr)
+library(igraph)
+library(patchwork)
+library(GGally)
+library(reshape2)
+library(knitr)
+library(kableExtra)
+library(textclean)
+library(Matrix)
+library(readr)
+library(lexicon)
+library(proxy)
+library(patchwork)
+```
+
+## LEVEL ONE ANALYSIS ----------------------------------------------------------
+```{r re-load previously processed tokens}
+clientRY_proc_toks_df <- read.csv("clientRY_proc_tokens_df.csv", row.names = 1)  # Read file and 
+```
+
+```{r calculate tf}
+# count words per session df
+clientRY_count <- clientRY_proc_toks_df %>%
+  count(session, word, sort = TRUE)
+
+# calculate total words per session
+total_words <- clientRY_count  %>%
+  group_by(session) %>%
+  summarize(total = sum(n))
+
+# calculate tf
+session_words <- left_join(clientRY_count, total_words) %>%
+  mutate(tf = n/total)
+
+# convert session to factor
+session_words$session <- as.factor(session_words$session)
+
+# calculate tf-idf and arrange in descending value
+session_words <- session_words %>%
+  mutate(session_number = str_extract(session, "\\d+") %>% as.numeric())
+         
+tfidf_words <- session_words %>%
+  bind_tf_idf(word, session, n) %>%
+  arrange(desc(tf_idf))
+```
+
+### Top TF-IDF words for sessions 1-4
+```{r many sessions plot tf-idf}
+sess_tfidf <- tfidf_words %>%
+  filter(session_number %in% c(1:4))
+
+# visualize high tf-idf words
+sess_tfidf %>%
+  group_by(session) %>%
+  arrange(desc(tf_idf)) %>%
+  slice_head(n = 15) %>%
+    ungroup() %>%
+  mutate(word = reorder_within(word, tf_idf, session)) %>% 
+  ggplot(aes(word, tf_idf, fill = session)) +
+  ylim(0, 0.08) +
+  geom_col(show.legend = FALSE) +
+  scale_x_reordered(name = NULL) +  
+  labs(x = NULL, y = "tf-idf") +
+  facet_wrap(~session_number, ncol = 2, scales = "free") +
+  coord_flip() +
+  ggtitle("Client 'RY' top 15 TF-IDF terms for the first 4 sessions") +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 12, face = "bold"), # Center and bold title
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12)
+  ) 
+```
+
+```{r many sessions plot tf-idf}
+sess_tfidf <- tfidf_words %>%
+  filter(session_number %in% c(51,52,53))
+
+# visualize high tf-idf words
+sess_tfidf %>%
+  group_by(session) %>%
+  arrange(desc(tf_idf)) %>%
+  slice_head(n = 15) %>%
+    ungroup() %>%
+  mutate(word = reorder_within(word, tf_idf, session)) %>% 
+  ggplot(aes(word, tf_idf, fill = session)) +
+  ylim(0, 0.08) +
+  geom_col(show.legend = FALSE) +
+  scale_x_reordered(name = NULL) +  
+  labs(x = NULL, y = "tf-idf") +
+  facet_wrap(~session_number, ncol = 3, scales = "free") +
+  coord_flip() +
+  ggtitle("Client 'RY' top 15 TF-IDF terms for sessions 51, 52, and 53") +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"), # Center and bold title
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12)
+  ) 
+```
+
+### Top TF-IDF words for highest tf-idf valued-words
+```{r many sessions plot tf-idf}
+sess_tfidf <- tfidf_words %>%
+  filter(session_number %in% c(11, 45, 26, 14, 55))
+
+# visualize high tf-idf words
+sess_tfidf %>%
+  group_by(session) %>%
+  arrange(desc(tf_idf)) %>%
+  slice_head(n = 15) %>%
+    ungroup() %>%
+  mutate(word = reorder_within(word, tf_idf, session)) %>% 
+  ggplot(aes(word, tf_idf, fill = session)) +
+  ylim(0, 0.145) +
+  geom_col(show.legend = FALSE) +
+  scale_x_reordered(name = NULL) +  
+  labs(x = NULL, y = "tf-idf") +
+  facet_wrap(~session_number, ncol = 3, scales = "free") +
+  coord_flip() +
+  ggtitle("Client 'RY' top 15 TF-IDF terms for sessions with the highest values") +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"), # Center and bold title
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12)
+  ) 
+```
+
+### Top TF-IDF words for lowest tf-idf valued-words
+```{r many sessions plot tf-idf}
+sess_tfidf <- tfidf_words %>%
+  filter(session_number %in% c(8,15,16,30,43))
+
+# visualize high tf-idf words
+sess_tfidf %>%
+  group_by(session) %>%
+  arrange(desc(tf_idf)) %>%
+  slice_head(n = 15) %>%
+    ungroup() %>%
+  mutate(word = reorder_within(word, tf_idf, session)) %>% 
+  ggplot(aes(word, tf_idf, fill = session)) +
+  ylim(0, 0.14) +
+  geom_col(show.legend = FALSE) +
+  scale_x_reordered(name = NULL) +  
+  labs(x = NULL, y = "tf-idf") +
+  facet_wrap(~session_number, ncol = 3, scales = "free") +
+  coord_flip() +
+  ggtitle("Client 'RY' top 15 TF-IDF terms for sessions with the lowest values") +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"), # Center and bold title
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12)
+  ) 
+```
+
+
+## LEVEL TWO ANALYSIS ----------------------------------------------------------
+```{r re-load sent scores list}
+clientRY_sent_score_list <- readRDS("ChapterV_sent_scores_list.rds")
+clientRY_sent_score_list[[1]]
+```
+
+```{r sentiment plots functions}
+# function to calculate sentiment total score per session
+sent_score_sess <- function(session_tokens, ind_n){
+  sent_scores <- session_tokens %>%
+    group_by(index = line %/% ind_n) %>%
+    summarise(sentiment = sum(value, na.rm = TRUE))
+}
+# single session raw sentiment plotting function
+session_raw_sent <- function(sess_num, ind_n, ylims){
+  
+  # extract session number from sentiment score list
+  sess_toks <- clientRY_sent_score_list[[sess_num]]
+  # classify as positive vs. negative
+  sess_scored <- sent_score_sess(sess_toks, ind_n) %>%
+    mutate(tot_sent = as.factor(ifelse(sentiment > 0, "positive", "negative")))
+  
+  # plot sentiment scores by section
+  sess_plot <- ggplot(sess_scored, aes(index, sentiment)) +
+  geom_point(aes(col = tot_sent), size = 2) + 
+  geom_line(data = sess_scored, aes(index, sentiment), size = 0.5) +
+  scale_color_manual(values = c("negative" = "red", "positive" = "green")) +
+  theme_bw() +
+  geom_vline(xintercept = 0, color = "black", size=0.3) +
+  geom_hline(yintercept = 0, color = "black", size=0.3) +
+  labs( title = paste0("Client RY raw sentiment scores for session ", sess_num),
+        x = "Section",
+        y = "Net sentiment score",
+        color = "Total sentiment") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 12)) + ylim(ylims)
+  sess_plot
+}
+
+# gam-smoothed sentiment plotting function
+sent_gam_func <- function(sess_num, ind_n, ylims){
+  # extract session number from sentiment score list
+  sess_toks <- clientRY_sent_score_list[[sess_num]]
+  # classify as positive vs. negative
+  sess_scored <- sent_score_sess(sess_toks, ind_n) %>%
+    mutate(tot_sent = as.factor(ifelse(sentiment > 0, "positive", "negative")))
+  
+  # GAM plot
+  sent_gam <- gam(sentiment ~ s(index), data = sess_scored)
+  # create a sequence of index values for a smooth curve
+  index_seq <- seq(min(sess_scored$index),
+                 max(sess_scored$index),
+                 length.out = 500)
+  # create new data for prediction
+  new_data <- data.frame(index = index_seq)
+  # predict using the GAM model
+  smoothed_preds <- predict(sent_gam, newdata = new_data)
+  # plot of gam-smoothed line
+  plot(index_seq, smoothed_preds, type = "l",
+     xlab = "Section", ylab = "Net sentiment score",
+     main = "", ylim = ylims)
+  abline(h = 0, col = "black", lty = 2)
+  title(paste0("Client RY GAM model-smoothed sentiment scores for session ", sess_num), font.main = 2)
+}
+```
+
+```{r session 29}
+# raw sentiment scores plot
+session_raw_sent(sess_num = 29, ind_n = 20, ylims = c(-35,10))
+# GAM-smoothed sentiment scores plot
+sent_gam_func(sess_num = 29, ind_n = 20, ylims = c(-35,10))
+```
+
+```{r session 8}
+# raw sentiment scores plot
+session_raw_sent(sess_num = 8, ind_n = 20, ylims = c(-40,10))
+# GAM-smoothed sentiment scores plot
+sent_gam_func(sess_num = 8, ind_n = 20, ylims = c(-40,10))
+```
+
+```{r session 43}
+# raw sentiment scores plot
+session_raw_sent(sess_num = 43, ind_n = 20, ylims = c(-35,10))
+# GAM-smoothed sentiment scores plot
+sent_gam_func(sess_num = 43, ind_n = 20, ylims = c(-35,10))
+```
+
+```{r session 14}
+# raw sentiment scores plot
+session_raw_sent(sess_num = 14, ind_n = 20, ylims = c(-15,10))
+# GAM-smoothed sentiment scores plot
+sent_gam_func(sess_num = 14, ind_n = 20, ylims = c(-15,10))
+```
+
+```{r client 1 full treatment sent plot}
+# loop to fill with total sentiment scores
+clientRY_total_sent_scores <- list()
+total_sents_all <- c()
+nsess = 56
+
+for(s in 1:length(clientRY_sent_score_list)){
+  client_sess_toks <- as.data.frame(clientRY_sent_score_list[s])
+  client_sess_sent <- sent_score_sess(client_sess_toks, ind_n = 10)
+  clientRY_total_sent_scores[[s]] <- client_sess_sent
+  total_sents_all[s] <- sum(client_sess_sent$sentiment)
+}
+
+# create dataframe to store total sentiment scores
+clientRY_total_sent_df_neg <- data.frame(session = c(1:nsess), 
+                                    total_sent = total_sents_all)
+
+# classify score as either positive or negative
+clientRY_total_sent_df_neg <- clientRY_total_sent_df_neg %>%
+  mutate(sentiment = as.factor(ifelse(total_sent > 0, "positive", "negative")))
+
+# plot sentiment scores by session number
+ggplot(clientRY_total_sent_df_neg, aes(session, total_sent)) +
+  geom_point(aes(col = sentiment), size=2) + 
+  geom_line(data = clientRY_total_sent_df_neg, aes(session, total_sent), size = 0.5) +
+  scale_color_manual(values = c("negative" = "red", "positive" = "green")) +
+  theme_bw() +
+  geom_vline(xintercept = 0, color = "black", size=0.3) +
+  geom_hline(yintercept = 0, color = "black", size=0.3) +
+  labs( title = "Client RY full treatment sentiment scores corrected for bigram negations",
+        x = "Session",
+        y = "Net sentiment score",
+        color = "Total sentiment") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 12))
+```
+
+
+
+## LEVEL THREE ANALYSIS ----------------------------------------------------------
+```{r reload PMI matrix}
+clientRY_PMI_list <- readRDS("ChapterV_PMI_list.rds")
+```
+
+### Conceptual space plots
+```{r conceptual space plot session 16}
+clientRY_s16_PMI_COR <- clientRY_PMI_list[[16]]
+
+# find common words between sessions 
+clientRY_s16_PMI_COR$word <- colnames(clientRY_s16_PMI_COR)
+
+# Session 16 conceptual space plot for feel and ivan
+ggplot(clientRY_s16_PMI_COR, aes(x = feel, y = ivan)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black") +  # Add horizontal line at y = 0
+  geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dotted", color = "black") +
+  xlim(0,6) +
+  ylim(0,6) +
+  xlab("feel") +
+  ylab("ivan") +
+  ggtitle("Client RY Session 16 conceptual space plot for the words 'feel' and 'ivan'") +
+   theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 13)) +
+    geom_text(aes(label = word), check_overlap = TRUE, size = 3.7, hjust = 0.5, vjust = -0.7) 
+```
+
+```{r conc space plot s 51 vs. 52}
+# extract session PMI matrix from list
+clientRY_s51_PMI_COR <- clientRY_PMI_list[[51]]
+clientRY_s52_PMI_COR <- clientRY_PMI_list[[52]]
+
+# find common words between sessions 
+clientRY_s51_PMI_COR$word <- colnames(clientRY_s51_PMI_COR)
+clientRY_s52_PMI_COR$word <- colnames(clientRY_s52_PMI_COR)
+shared_vocab <- intersect(clientRY_s51_PMI_COR$word, clientRY_s52_PMI_COR$word )
+print(shared_vocab)
+
+# Session 51 conceptual space plot for feel and list
+ggplot(clientRY_s51_PMI_COR, aes(x = feel, y = list)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black") +  # Add horizontal line at y = 0
+  geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dotted", color = "black") +
+  xlim(0,7) +
+  ylim(0,7) +
+  xlab("feel") +
+  ylab("list") +
+  ggtitle("Client RY Session 51 conceptual space plot for the words 'feel' and 'list'") +
+   theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 13)) +
+    geom_text(aes(label = word), check_overlap = TRUE, size = 3.7, hjust = 0.5, vjust = -0.7) 
+
+# Session 52 conceptual space plot for words feel and list
+ggplot(clientRY_s52_PMI_COR, aes( x = feel, y = list)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black") +  # Add horizontal line at y = 0
+  geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dotted", color = "black") +
+  xlim(0,7) +
+  ylim(0,7) +
+  xlab("feel") +
+  ylab("list") +
+  ggtitle("Client RY Session 52 conceptual space plot for words 'feel' and 'list'") +
+  theme_bw() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 13)) +
+    geom_text(aes(label = word), check_overlap = TRUE, size = 3.7, hjust = 0.5, vjust = -0.7) 
+```
+
+### Mean and variance plot
+```{r reload dp files}
+clientRY_dp_list <- readRDS("ChapterV_dps_list.rds")
+clientRY_dp_summ <- read.csv("clientRY_dp_summ.csv", row.names = 1)
+
+# separate into dp list and vocab list
+clientRY_dp_all <- clientRY_dp_list$dp_list
+clientRY_dp_vocab <- clientRY_dp_list$vocab
+```
+
+```{r dp mean and var plot}
+# calculate mean per means and variance
+mean_means_RY <- mean(clientRY_dp_summ$mean)
+mean_vars_RY <- mean(clientRY_dp_summ$var)
+  
+# add line for session 1 variance 
+sess1_var_RY <- clientRY_dp_summ[1,3]
+  
+# added lines plot 1
+ggplot(clientRY_dp_summ, aes( x = mean, y = var, col = as.numeric(factor(session)))) +
+    geom_point(size = 3) + 
+    ggtitle("Client RY dot product mean and variance per session") + 
+    xlab("Mean") + 
+    ylab("Variance") + 
+    xlim(100,350) +
+    ylim(0,25000) +
+    geom_hline(yintercept=sess1_var_RY, linetype= "dashed", color = "darkgrey", size=0.5) +
+    geom_vline(xintercept = mean_means_RY, color = "blue", size=0.3) +
+    geom_hline(yintercept = mean_vars_RY, color = "blue", size=0.3) +
+    geom_abline(intercept = -10000, slope = 100, color = "black", size = 0.5) +
+    scale_color_gradient(low = "lightgray", high = "purple") +
+    theme_bw() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+          legend.position = "bottom") +
+    labs(color = "Session number") +
+      geom_text(aes(label = session), check_overlap = TRUE, size = 2.5, hjust = 1.5, vjust = -0.3) 
+```
+
+### Dot product histograms
+```{r histogram session 30 vs. 31}
+# compare dot products session 30 vs. 31
+dps_s30 <- clientRY_dp_all[[30]]
+dps_s31 <- clientRY_dp_all[[31]]
+
+# plot panel for density histogram session 30 and 31
+par(mfrow = c(2,1))
+ps30 <- ggplot(dps_s30, aes(x = dp)) +
+  geom_histogram(aes(y = ..density..), fill = "mediumpurple1", color = "white", bins = 30) +  # pretty fill & white borders
+  geom_density(color = "#34495E", size = 0.5, alpha = 0.7) +  # smooth density overlay
+  labs(
+    title = "Session 30 dot product distribution",
+    x = "Dot product",
+    y = "Density"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10)
+  ) + coord_cartesian(xlim = c(0,950), ylim = c(0,0.004))  
+
+ps31 <- ggplot(dps_s31, aes(x = dp)) +
+  geom_histogram(aes(y = ..density..), fill = "azure4", color = "white", bins = 30) +  # Pretty fill & white borders
+  geom_density(color = "#34495E", size = 0.5, alpha = 0.7) +       # Smooth density overlay
+  labs(
+    title = "Session 31 dot product distribution",
+    x = "Dot product",
+    y = "Density"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10)
+  ) + coord_cartesian(xlim = c(0,950), ylim = c(0,0.004))  
+
+ps30/ps31
+```
+
+```{r histogram session 9 vs. 29}
+# compare dot products session 9 vs. 29
+dps_s9 <- clientRY_dp_all[[9]]
+dps_s29 <- clientRY_dp_all[[29]]
+
+# plot panel for density histogram session 9 and 29
+par(mfrow = c(2,1))
+ps9 <- ggplot(dps_s9, aes(x = dp)) +
+  geom_histogram(aes(y = ..density..), fill = "lightsalmon", color = "white", bins = 30) +  # Pretty fill & white borders
+  geom_density(color = "#34495E", size = 0.5, alpha = 0.7) +       # Smooth density overlay
+  labs(
+    title = "Session 9 dot product distribution",
+    x = "Dot product",
+    y = "Density"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10)
+  ) + coord_cartesian(xlim = c(0,950), ylim = c(0,0.004))  
+
+ps29 <- ggplot(dps_s29, aes(x = dp)) +
+  geom_histogram(aes(y = ..density..), fill = "#7CE3D8", color = "white", bins = 30) +  # Pretty fill & white borders
+  geom_density(color = "#34495E", size = 0.5, alpha = 0.7) +       # Smooth density overlay
+  labs(
+    title = "Session 29 dot product distribution",
+    x = "Dot product",
+    y = "Density"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10)
+  ) + coord_cartesian(xlim = c(0,950), ylim = c(0,0.004))  
+
+ps9/ps29
+```
+
+### Coefficient of variation
+```{r coeff of var plot}
+# plot coefficient of variation per therapy session
+ggplot(clientRY_dp_summ , aes(x = session, y = var_coeff)) +
+  geom_line(aes(y = var_coeff), size = 0.7, col = "blue") +   # Line for mean
+  labs(x = "Session", y = "CV", title = "Client 'RY' coefficient of variation (CV)") +
+  theme_minimal() + 
+  theme(legend.title = element_blank()) +
+  geom_text(aes(label = session), check_overlap = TRUE, size = 2.7, hjust = -0.3, vjust = -0.5) 
+```
+
+### Histograms of highest vs. lowest CV sessions
+```{r base R histogram plots}
+# High CV sessions: 9, 30, 25, 10, 46, 32, 15, 42, 35
+par(cex = 0.8) 
+par(mfrow = c(3, 3))
+hist(clientRY_dp_all[[9]]$dp, main = "Session 9", 
+     xlab = "Dot product", ylim =c(0,1500), cex = 1.5)
+hist(clientRY_dp_all[[30]]$dp, main = "Session 30", 
+     xlab = "Dot product", ylim =c(0,1500))
+hist(clientRY_dp_all[[25]]$dp, main = "Session 25", 
+     xlab = "Dot product", ylim =c(0,1500))
+hist(clientRY_dp_all[[10]]$dp, main = "Session 10", 
+     xlab = "Dot product", ylim =c(0,1500))
+hist(clientRY_dp_all[[46]]$dp, main = "Session 46", 
+     xlab = "Dot product", ylim =c(0,1500), xlim = c(0,800))
+hist(clientRY_dp_all[[32]]$dp, main = "Session 32", 
+     xlab = "Dot product", ylim =c(0,1500), xlim = c(0,800))
+hist(clientRY_dp_all[[15]]$dp, main = "Session 15", 
+     xlab = "Dot product", ylim =c(0,1500))
+hist(clientRY_dp_all[[42]]$dp, main = "Session 42", 
+     xlab = "Dot product", ylim =c(0,1500))
+hist(clientRY_dp_all[[35]]$dp, main = "Session 35", 
+     xlab = "Dot product", ylim =c(0,1500))
+
+mtext("Histograms of dot products for the highest CV sessions", outer = TRUE, cex = 1.5, line = 1, font = 2)
+
+
+# Low CV sessions: 55, 40, 11, 4, 21, 31, 23, 36, 29
+par(cex = 0.8) 
+par(mfrow = c(3, 3))
+hist(clientRY_dp_all[[55]]$dp, main = "Session 55", 
+     xlab = "Dot product", xlim = c(0,850), ylim =c(0,900))
+hist(clientRY_dp_all[[40]]$dp, main = "Session 40", 
+     xlab = "Dot product", xlim = c(0,850), ylim =c(0,900))
+hist(clientRY_dp_all[[11]]$dp, main = "Session 11", 
+     xlab = "Dot product", xlim = c(0,850), ylim =c(0,900))
+hist(clientRY_dp_all[[4]]$dp, main = "Session 4", 
+     xlab = "Dot product", xlim = c(0,850), ylim =c(0,900))
+hist(clientRY_dp_all[[21]]$dp, main = "Session 21", 
+     xlab = "Dot product", xlim = c(0,850), ylim =c(0,900))
+hist(clientRY_dp_all[[31]]$dp, main = "Session 31", 
+     xlab = "Dot product", xlim = c(0,850), ylim =c(0,900))
+hist(clientRY_dp_all[[23]]$dp, main = "Session 23", 
+     xlab = "Dot product", xlim = c(0,850), ylim =c(0,900))
+hist(clientRY_dp_all[[36]]$dp, main = "Session 36", 
+     xlab = "Dot product", xlim = c(0,850), ylim =c(0,900))
+hist(clientRY_dp_all[[29]]$dp, main = "Session 29", 
+     xlab = "Dot product", xlim = c(0,850), ylim =c(0,900))
+
+mtext("Histograms of dot products for the lowest CV sessions", outer = TRUE, cex = 1.5, line = 1, font = 2)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

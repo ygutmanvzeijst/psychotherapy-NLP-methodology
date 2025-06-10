@@ -1,0 +1,793 @@
+---
+title: "Thesis_general_cleaning_preprocess"
+author: "Yael Gutman"
+date: "`r Sys.Date()`"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load libraries
+```{r libraries}
+library(dplyr)
+library(tidyr)
+library(text2vec)
+library(tidyverse)
+library(tidytext)
+library(ggplot2)
+library(tm)
+library(stringr)
+library(pdftools)
+library(readr)
+library(textstem)
+library(textclean)
+library(lexicon)
+library(Matrix)
+library(proxy)
+library(gridExtra)
+```
+
+############## LOADING FUNCTIONS ##############
+First load all the pre-processing, co-occurrence matrix and PMI-transformation functions.
+
+## 1) Tokenization, frequency filters, and lemmatization 
+```{r load pre-processing functions}
+# Tokenization: convert string to tibble and create tokens
+token_func <- function(processed_text){
+  
+  # convert string into tibble
+  text_df <- tibble(text = processed_text)
+  
+  # convert to tokens
+  text_tokens <- text_df %>%
+    unnest_tokens(word, text)
+  
+  return(text_tokens)
+}
+
+# Stop words removal
+stop_words_removal <- function(text_tokens, custom_stop_words){
+  # adds custom stop-words to stop-word lexicon
+  stop_words <- rbind(stop_words, data.frame( word = custom_stop_words, lexicon = "custom"))
+  
+  # removes words in stop-word lexicon
+  nostop_text_tokens <- text_tokens %>%
+    anti_join(stop_words, by = "word")
+  
+  return(nostop_text_tokens)
+}
+
+# Lemmatization: uses textstem, however, results are not optimal (e.g. feelings and feel are not given the same lemma)
+lemmatization_func <- function(nostop_text_tokens){
+  
+  # uses hash_lemmas lexicon to lemmatize the tokens
+  lemm_tokens <- nostop_text_tokens %>%
+    mutate(word = lemmatize_strings(word, dictionary = lexicon::hash_lemmas))
+  
+  return(lemm_tokens)
+}
+
+# Rare words removal: empty function for now
+rare_words_removal <- function(lemm_tokens, freq_threshold){
+  
+  # Add row number to preserve order
+  lemm_tokens <- lemm_tokens %>%
+    mutate(row_num = row_number())
+  
+  # count n words
+  lemma_count <- lemm_tokens %>%
+    count(word)
+  
+  # filter words with count less than threshold
+  norare_text_tokens <- lemm_tokens %>%
+    inner_join(lemma_count %>% filter(n > freq_threshold), by = "word") %>%
+    arrange(row_num) %>%
+    dplyr::select(-row_num, -n)
+  
+  return(norare_text_tokens)
+}
+```
+
+## 2) Co-occurrence matrix, and PMI correction functions
+```{r load co-occurrence functions}
+### Functions: co-occ matrix, word_count, pmi_formula_COR, assoc_matrix_func_COR, pipeline_matrices_func_COR
+# PMI matrix function correction --------------------------------------------
+co_occ_matrix_func_COR <- function(lemm_tokens, window_size, weights){
+  
+  if(is.null(weights) == TRUE){
+    weights <- rep(1, window_size)
+  }
+  else{
+    weights <- 1/seq_len(window_size)
+  }
+  
+  # create an iterator and a unique vocabulary of terms
+  words_ls <- list(lemm_tokens$word)
+  it <- itoken(words_ls, progressbar = FALSE ) # itoken: allows the iteration of each token at a time, for memory purposes
+  vocab <- create_vocabulary(it) 
+  
+  # create a token co-occurrence matrix (TCM) using iterator, vectorizer and specified window
+  vectorizer <- vocab_vectorizer(vocab) 
+  tcm <- create_tcm(it, vectorizer, weights, skip_grams_window = window_size,
+                    skip_grams_window_context = "symmetric")
+
+  # symmetrize matrix
+  tcm_matrix <- as.matrix(tcm)
+  tcm_matrix[lower.tri(tcm_matrix)] <- t(tcm_matrix)[lower.tri(tcm_matrix)]
+  
+  return(tcm_matrix)
+}
+
+word_count <- function(final_tokens, tcm_matrix){
+  # Create the dictionary with word counts
+  word_counts <- final_tokens %>%
+    group_by(word) %>%
+    summarise(count = n(), .groups = 'drop')
+  
+  # arrange word counts in order of tcm
+  tcm_words <- colnames(tcm_matrix)
+  word_counts <- word_counts %>%
+    mutate(word = factor(word, levels = tcm_words)) %>%
+    arrange(word)
+  word_counts <- word_counts$count
+  
+  return(word_counts)
+}
+
+pmi_formula_COR <- function(wco_prob, mult_ind_prob){
+  value <- log2(wco_prob / mult_ind_prob)
+  return(value)
+}
+
+assoc_matrix_func_COR <- function(tcm_matrix, tformula, n_words, word_counts){
+  
+  # convert into a sparse matrix
+  tcm_sparse_matrix <-  Matrix(tcm_matrix, sparse=T)
+  tcm_sparse_matrix <- as(tcm_sparse_matrix, "TsparseMatrix")
+  
+  # Calculate independent word-co-occurrence probabilities for each word
+  row_prob <- word_counts / n_words
+  col_prob <- word_counts / n_words
+  
+  # Create a sparse matrix to store PMI values
+  r_words <- nrow(tcm_sparse_matrix)
+  c_words <- ncol(tcm_sparse_matrix)
+  tmatrix <- matrix(0, nrow = r_words, ncol = c_words)
+  
+  # Iterate over non-zero elements of the sparse matrix
+  for (i in seq_len(length(tcm_sparse_matrix@x))){
+    r <- tcm_sparse_matrix@i[i] + 1  # Row index (convert from 0-based to 1-based)
+    c <- tcm_sparse_matrix@j[i] + 1  # Column index (convert from 0-based to 1-based)
+    wco <- tcm_sparse_matrix@x[i]    # Word co-occurrence count
+    
+    # pair word co-occurrence probability
+    wco_prob <- ( wco / n_words )
+    
+    # multiplied independent probabilities for each word
+    mult_ind_prob <- ( row_prob[r] * col_prob[c] )
+    if(mult_ind_prob == 0){
+      tmatrix[r, c] <- 0
+    }
+    else{
+      # calculate association measure according to given formula
+      tmatrix[r, c] <- tformula(wco_prob, mult_ind_prob)
+    }
+  }
+  # make matrix sparse and symmetrize
+  tmatrix <- Matrix(tmatrix, sparse=T)
+  pmi_matrix <- as.matrix(tmatrix)
+  pmi_matrix[lower.tri(pmi_matrix)] <- t(pmi_matrix)[lower.tri(pmi_matrix)]
+  return(pmi_matrix)
+}
+
+# PIPELINE FUNCTION WITH CORRECTIONS
+pipeline_matrices_func_COR <- function(text, window_size, custom_stop_words, freq_threshold, weights){
+  
+  # Pre-processing steps:
+  text_tokens <- token_func(text)
+  nostop_text_tokens <- stop_words_removal(text_tokens, custom_stop_words)
+  lemm_tokens <- lemmatization_func(nostop_text_tokens)
+  norare_text_tokens <- rare_words_removal(lemm_tokens, freq_threshold)
+  n_words <- length(norare_text_tokens$word)
+  
+  # Co-occurrence matrix + transformations: PMI, Chi^2, cosine similarity
+  tcm_matrix <- co_occ_matrix_func_COR(norare_text_tokens, window_size, weights)
+  word_counts <- word_count(norare_text_tokens, tcm_matrix)
+  pmi_matrix <- as.matrix(assoc_matrix_func_COR(tcm_matrix, pmi_formula_COR, n_words, word_counts))
+  
+  # re-assign column and row names
+  colnames(pmi_matrix) <- colnames(tcm_matrix)
+  rownames(pmi_matrix) <- rownames(tcm_matrix)
+  
+  return(list(tokens = text_tokens, processed_tokens = norare_text_tokens, TCM = tcm_matrix, 
+              PMI = pmi_matrix))
+}
+```
+
+## 3) Dot product calculation and summary statistics
+```{r dot product functions}
+# dot product calculation without same word pairs
+dot_prod_func_unique <- function(df){
+  
+# create matrix with # of rows = half of matrix and diagonal (since it is symmetrical)
+  dot_matrix <- matrix(NA, nrow = (nrow(df)*(nrow(df) - 1))/2, ncol = 3)
+  vocab <- colnames(df)
+  rowN <- 1
+  for(v in vocab){
+    for (w in vocab){
+      if( v != w) {
+        # avoid repeated pairs
+       if (which(vocab == v) < which(vocab == w)) {
+          # first word in pair
+          dot_matrix[rowN,1] <- v
+          # second word in pair
+          dot_matrix[rowN,2] <- w
+        
+          # calculate 'pure' dot product
+          dp <- sum(df[,v] * df[,w])
+          dot_matrix[rowN,3] <- dp
+        
+          # update row value
+          rowN <- rowN + 1
+       }
+      }
+    } 
+  }
+  dot_matrix <- na.omit(dot_matrix)
+  colnames(dot_matrix) <- c("word1", "word2", "dp")
+  dot_df <- as.data.frame(dot_matrix)
+  dot_df[,3] <- as.numeric(dot_df[,3])
+  return(dot_df)
+}
+
+mean_var_dp_func <- function(dot_df){
+  mean_var_dp_df <- data_frame(mean_dp = mean(dot_df$dp), 
+                               var_dp = var(dot_df$dp))
+  return(mean_var_dp_df)
+}
+
+dp_all_sessions <- function(client_PMI_list){
+  # dp calculation for all sessions
+  dp_list <- list()
+  vocab <- list()
+  
+  # from 1 to max sessions load files, apply dp function and save into list
+  for(s in seq_along(client_PMI_list)){
+    sess_pmi <- client_PMI_list[[s]]
+    sess_names <- colnames(sess_pmi)
+    
+    # turn pmi into matrix
+    pmi_matrix <- as.matrix(sess_pmi)
+    sess_df <- sess_pmi
+    rownames(sess_df) <- sess_names
+    
+    # get dp df
+    sess_dp <- dot_prod_func_unique(sess_df)
+    dp_list[[s]] <- sess_dp
+    vocab[[s]] <- sess_names
+  }
+  return(list(dp_list = dp_list, vocab = vocab))
+}
+
+# function to create a df summarizing dot products for a session
+dp_df_func <- function(client_dp_list, max_sess){
+  client_dp_all <- client_dp_list$dp_list
+  client_dp_vocab <- client_dp_list$vocab
+  
+  client_vals_df <- data.frame(session = c(1:max_sess), mean = NA, var = NA)
+  for(s in 1:length(client_dp_all)){
+    data <- client_dp_all[[s]]
+    client_vals_df[s,2] <- mean(data$dp)
+    client_vals_df[s,3] <- var(data$dp)
+  }
+  
+  # adding a coefficient of variation column
+  client_sd <- sqrt(client_vals_df$var)
+  client_vals_df <- client_vals_df %>%
+    mutate(var_coeff = client_sd/client_vals_df$mean)
+  return(client_vals_df)
+} 
+```
+
+
+############## APPLICATION ##############
+
+## CHAPTER IV. METHODOLOGY - DR. BECK & ABE TOY EXAMPLE ------------------------
+
+### a) Cleaning
+```{r cleaning beck 2 excerpt}
+## Input: excerpt of example raw psychotherapy transcript Dr. Judith Beck and Abe session 2
+## Output: cleaned, lowercase single string (without unwanted characters or digits)
+
+# reading-in and cleaning file(s)
+beck_sess2_toy <- pdf_text("Beck sess2 toy example.pdf")
+
+# collapse text into one
+beck_session2_text <- paste(beck_sess2_toy, collapse = "\n")
+
+# removing unnecessary characters:
+beck2_remov <- gsub("\n", " ", beck_session2_text) # remove "\n" character
+beck2_remov <- gsub("\"", "", beck2_remov) # remove slash
+beck2_short_cleaned <- beck2_remov %>%
+  str_replace_all("\\[[^\\]]*\\]", "") %>% # replaces text in brackets such as comments
+  str_replace_all("(^|\\s)(Judith:|Abe:)", "") %>% # removing speaker labels
+  str_replace_all("\\([^\\)]*\\)", "") %>% # removes text inside parenthesis
+  str_replace_all("\\s+", " ") %>% # removes additional spaces
+  str_replace_all("[0-9]", "") %>% # removes digits
+  replace_contraction() %>% # replace contractions with corresponding words
+  as.character() %>% 
+  removePunctuation(ucp = TRUE) %>% # removes all remaining punctuation
+  tolower() %>% # changes to lowercase letters
+  str_trim() # eliminates any remaining unwanted white space
+```
+
+
+
+### b) Apply pipeline
+```{r apply functions}
+custom_stop_words <- c("yeah", "mmhmm", "uhhuh", "bit")
+beck2_short_pipeline <- pipeline_matrices_func_COR(beck2_short_cleaned, 
+                                         window_size = 2, 
+                                         custom_stop_words, 
+                                         freq_threshold = 1, 
+                                         weights = NULL)
+beck2_short_pipeline
+```
+
+
+## CHAPTER V. EXAMPLE CASE - CLIENT 1  -----------------------------------------
+############### LEVEL ONE ################
+### a) Cleaning
+```{r APPLYING cor pipeline to CLIENT 1 sessions part 1}
+################################################################################
+
+# Divide into separate files between 'END TRANSCRIPT' and 'BEGIN TRANSCRIPT'
+clientRY_pdf1 <- pdf_text("Client RY Part 1 - Session 1 - 11.pdf") # 12 sessions
+clientRY_pdf2 <- pdf_text("Client RY Part 2 - Session 17 - 66.pdf")
+clientRY_pdf3 <- pdf_text("Client RY Part 3 - Session 56 - 66.pdf")
+
+# delimiter
+delimiter <- "\nEND TRANSCRIPT\n"
+
+clientRY_pdf1 <- paste(clientRY_pdf1, collapse = "\n")
+clientRY_p1 <- strsplit(clientRY_pdf1, delimiter)[[1]]
+
+clientRY_pdf2 <- paste(clientRY_pdf2, collapse = "\n")
+clientRY_p2 <- strsplit(clientRY_pdf2, delimiter)[[1]]
+
+clientRY_pdf3 <- paste(clientRY_pdf3, collapse = "\n")
+clientRY_p3 <- strsplit(clientRY_pdf3, delimiter)[[1]]
+
+clientRY_transcripts <- c(clientRY_p1, clientRY_p2, clientRY_p3)
+
+################################################################################
+
+# CLEANING FUNCTION ------------------------------------------------------------
+cleaning_Clients <- function(text){
+  
+  remov <- gsub("\n", " ", text)
+  remov <- remov %>%
+    str_replace_all("BEGIN TRANSCRIPT:", "") %>%
+    str_replace_all("CLIENT:", "") %>%
+    str_replace_all("THERAPIST:", "") %>%
+    str_replace_all("INTERVIEWER:", "") %>%
+    str_replace_all("RESPONDENT:", "") %>%
+    str_replace_all("\\([^\\)]*\\)|\\[[^\\]]*\\]", " ") %>% # remove text in parenthesis or brackets
+    str_replace_all("\\s+", " ") %>% # remove additional space
+    str_replace_all("[0-9]", " ") %>%
+    str_replace_all("—", " ") %>%
+    str_replace_all("’", "'") %>% # replace curly apostrophes with straight for contraction replacement
+    replace_contraction() %>%
+    str_replace_all("\\bit'd\\b", "it would") %>%  # Fix 'it'd'
+    str_replace_all("\\byou'd\\b", "you would") %>%  # Fix 'you'd'
+    str_replace_all("\\bshe'd\\b", "she would") %>%  # Fix 'she'd'
+    str_replace_all("\\bhe'd\\b", "he would") %>%   # Fix 'he'd'
+    str_replace_all("\\bwe'd\\b", "we would") %>%   # Fix 'we'd'
+    str_replace_all("\\bthey'd\\b", "they would") %>%
+    tolower() %>%
+    str_replace_all("[[:punct:]]", " ") %>% 
+    as.character() %>%
+    str_replace_all("  ", " ") # this eliminates any remaining unwanted white space
+  
+  return(remov)
+}
+################################################################################
+```
+
+```{r complete processing function}
+# PROCESSING: TOKENIZATON, LEMMATIZATION, ETC. FUNCTION ------------------------
+# Adjust weights, if set to NULL no weights added, else default
+process_PMI_Client <- function(text, weights, freq_thresh, custom_stop_words){
+  clean_text <- cleaning_Clients(text)
+  pipeline_Cl <- pipeline_matrices_func_COR(clean_text,
+                                        window_size = 5, 
+                                        custom_stop_words, 
+                                        freq_threshold = freq_thresh, 
+                                        weights = weights)
+  sess_toks <- as.data.frame(pipeline_Cl$processed_tokens)
+  sess_PMI <- as.data.frame(pipeline_Cl$PMI)
+  return(list(sess_toks = sess_toks, sess_PMI = sess_PMI))
+}
+```
+
+### b) Apply pipeline
+save processed tokens file
+```{r APPLYING cor pipeline to CLIENT RY}
+# specify argument values
+custom_stop_words_RY <- c("ah", "hum", "mm", "hm", "um", "hmm", "mhm", "uh", "yep", 
+                          "yea", "yeah", "uhhuh","mmhmm", "whoa")
+weights <- NULL
+freq_thresh <- 3
+
+# apply processing function to every session in the list
+clientRY_proc_toks_list <- list()
+clientRY_PMI_list <- list()
+
+for(s in c(1:56)){
+  file <- paste0("clientRY_s", s,"_proc_tokens.csv")
+  txt <- clientRY_transcripts[[s]]
+  proc_cl <- process_PMI_Client(txt, weights = weights, freq_thresh, custom_stop_words = custom_stop_words_RY)
+  clientRY_PMI_list[[s]] <- proc_cl$sess_PMI
+  clientRY_proc_toks_list[[s]] <- proc_cl$sess_toks
+}
+
+# create dataframe of tokens by session number
+sess_bind <- data_frame(word = c(), session = c())
+for(s in 1:length(clientRY_proc_toks_list)){
+  sess <- clientRY_proc_toks_list[[s]]
+  sess <- sess %>%
+    mutate(session = paste0("Session_", s))
+  sess_bind <- rbind(sess_bind, sess)
+}
+```
+save processed files
+```{r save files}
+# save processed tokens df
+write.csv(sess_bind, file = "clientRY_proc_tokens_df.csv", row.names = TRUE)
+
+# save PMI matrices per session for chapter V
+saveRDS(clientRY_PMI_list, file = "ChapterV_PMI_list.rds")
+```
+
+############### LEVEL TWO ################
+Specific cleaning function for sentiment analysis (tokenization into bigrams and adding line numbers)
+```{r clean text func}
+# function to split by \n or \n\n characters to add line numbers
+clean_text_sent_func <- function(text){
+  cleanSent_client <- text %>%
+    replace_contraction() %>%
+    str_replace_all("BEGIN TRANSCRIPT:", "") %>%
+    str_replace_all("CLIENT:", "") %>%
+    str_replace_all("THERAPIST:", "") %>%
+    str_replace_all("\\([^\\)]*\\)|\\[[^\\]]*\\]", "") %>% # remove text in parenthesis or brackets
+    #str_replace_all("\\s+", " ") %>% # remove additional space
+    str_replace_all("[0-9]", "") %>%
+    removePunctuation(ucp = TRUE) %>% # removes all punctuation including parenthesis
+    tolower() %>%
+    str_split(pattern = "\n{1,2}") %>%
+    unlist() %>%
+    as_tibble() %>%
+    mutate(line = row_number())
+  return(cleanSent_client)
+}
+```
+
+```{r negation correcting function}
+# negation correcting on bigrams function
+neg_corrected_sent <- function(negations, text, index_n, stop_words){
+  # make into bigrams
+  bigrams_text <- text %>%
+    unnest_tokens(bigram, value, token = "ngrams", n = 2)
+  
+  # separate them
+  bigram_sep <- bigrams_text %>%
+    separate(bigram, c("word1", "word2"), sep = " ")
+  
+  # filter bigrams where word1 is a negation word
+  negationb <- bigram_sep %>%
+    filter(word1 %in% negations) %>%
+    inner_join(get_sentiments(lexicon = "afinn"), by = c(word2 = "word")) %>%
+    mutate(value = value * -1) %>% 
+    unite(bigram, word1, word2, sep = " ") %>%
+    mutate(word = bigram) %>%
+    select(-bigram)
+  
+  # filter all rows with non-negation word 1 bigrams, make unique words again, then score sentiment
+  unique <- bigram_sep %>%
+    filter(!word1 %in% negations) %>%
+    inner_join(get_sentiments(lexicon = "afinn"), by = c(word2 = "word")) %>%
+    select(-word1) %>%
+    filter(!word2 %in% stop_words$word) %>%
+    filter(!word2 %in% negations) %>%
+    mutate(word = word2) %>%
+    select(-word2)
+  
+  # join back all words
+  comb <- bind_rows(negationb, unique) %>%
+    arrange(line)
+  
+  return(comb)
+}
+```
+
+```{r stop words}
+custom_stop_words <- c("hum", "mm", "hm", "um", "hmm", "mhm", "ive", "didnt", "uh", "yep", "yea", "yeah","youre", "shes", "uhhuh", "doesnt", "im", "hes", "weve", "wasnt", "theyre", "didnt",  "mmhmm", "blah")
+
+stop_words <- rbind(stop_words, data.frame(word = custom_stop_words, lexicon = "custom"))
+
+negations <- c("no", "not", "never", "none", "neither", "nobody", "nothing", "nowhere", "hardly", "scarcely", "barely", "without", "except", "fail", "seldom")
+stop_words2 <- stop_words %>%
+  filter(!word %in% negations)
+```
+
+```{r apply through all sessions}
+# apply cleaning and pipeline run through per session
+clientRY_sent_list <- list()
+for(s in 1:length(clientRY_transcripts)){
+  text <- clientRY_transcripts[s] %>%
+    str_replace_all("’", "'")
+  linenumb_text <- clean_text_sent_func(text)
+  neg_corrected_tokens <- neg_corrected_sent(negations, linenumb_text, index_n = 10, stop_words = stop_words2)
+  clientRY_sent_list[[s]] <- neg_corrected_tokens
+}
+# save the session-wise list of sentiment scored tokens
+saveRDS(clientRY_sent_list, file = "ChapterV_sent_scores_list.rds")
+```
+
+############### LEVEL THREE ################
+```{r dot product list}
+# calculate dot products for each session client RY
+clientRY_dp_list <- dp_all_sessions(clientRY_PMI_list)
+clientRY_dp_summ <- dp_df_func(clientRY_dp_list, max_sess = 56)
+
+# save dp list 
+saveRDS(clientRY_dp_list, file = "ChapterV_dps_list.rds")
+# save dp summary df
+write.csv(clientRY_dp_summ, file = "clientRY_dp_summ.csv", row.names = TRUE)
+```
+
+
+## CHAPTER VI. MULTIPLE CASES  -------------------------------------------------
+Load the transcripts per client
+```{r function multiple client processing}
+# function to apply function on multiple clients
+mult_cls_process <- function(client_name, transcripts, custom_words, weights, freq_thresh){
+  weights <- weights
+  freq_thresh <- freq_thresh
+  
+  # apply cleaning and pipeline run through per session
+  client_PMI_list <- list()
+  client_toks_list <- list()
+  client_n <- c()
+
+  for(s in seq_along(transcripts)){
+    # generating PMI matrices and processed tokens per client
+    sess <- transcripts[[s]]
+    s_PMI <- process_PMI_Client(sess, weights = weights, freq_thresh, custom_words)
+    client_PMI_list[[s]] <- s_PMI$sess_PMI
+    client_toks_list[[s]] <- s_PMI$sess_toks
+    client_n <- c(client_n, as.numeric(s_PMI$sess_n))
+  }
+  return(list(proc_toks = client_toks_list, PMI = client_PMI_list))
+}
+weights <- NULL
+freq_thresh <- 3
+```
+
+```{r client RY save processed files}
+# generate and save client RY PMI matrix and processed tokens
+clientRY_files <- mult_cls_process("RY", clientRY_transcripts, custom_stop_words_RY, weights, freq_thresh)
+clientRY_PMI_list <- clientRY_files$PMI
+
+# save files
+saveRDS(clientRY_files$proc_toks, file = paste0("ChapterVI_RY_toks_list.rds"))
+saveRDS(clientRY_files$PMI, file = paste0("ChapterVI_RY_PMI_list.rds"))
+```
+
+```{r client M save processed files}
+# Load PDF and separate by session  --------------------------------------------
+
+# Divide into separate files between 'END TRANSCRIPT' and 'BEGIN TRANSCRIPT'
+clientM_pdf <- pdf_text("Client _M_ session transcripts Nov 2012 to March 2014.pdf")
+# collapse into single string
+clientM_pdf <- paste(clientM_pdf, collapse = "\n")
+
+# delimiter
+delimiter <- "\nEND TRANSCRIPT"
+
+# Split the text into segments
+clientM_transcripts <- strsplit(clientM_pdf, delimiter)[[1]]
+clientM_transcripts <- clientM_transcripts[-37]
+nchar(clientM_transcripts)
+
+# SPECIFY ARGUMENTS AND APPLY FUNCTIONS ----------------------------------------
+# Specify argument values
+clientM_custom_stop_words <- c("wow", "hum", "mm", "hm", "um", "hmm", "mhm", "ive", "didnt", "uh", "yep", "yea", "yeah",
+                      "youre", "shes", "uhhuh", "doesnt", "im", "hes", "weve", "wasnt", "theyre", "didnt",
+                      "mmhmm", "blah")
+
+clientM_files <- mult_cls_process("M", clientM_transcripts, clientM_custom_stop_words, weights, freq_thresh)
+clientM_PMI_list <- clientM_files$PMI
+
+# save files
+saveRDS(clientM_files$proc_toks, file = paste0("ChapterVI_M_toks_list.rds"))
+saveRDS(clientM_files$PMI, file = paste0("ChapterVI_M_PMI_list.rds"))
+```
+
+```{r client SR save processed files}
+# LOAD PDF AND SEPARATE BY SESSION ---------------------------------------------
+clientSR_pdf <- pdf_text("Client SR oct 24, 2013 to April 2014.pdf") # 18 sessions
+
+clientSR_pdf <- paste(clientSR_pdf, collapse = "\n")
+clientSR_transcripts <- strsplit(clientSR_pdf, delimiter)[[1]]
+
+clientSR_transcripts <- clientSR_transcripts
+length(clientSR_transcripts)
+nchar(clientSR_transcripts)
+
+# deleting last item, it had one character, not a real session
+clientSR_transcripts <- clientSR_transcripts[-19]
+
+# Specify arguments ------------------------------------------------------------
+clientSR_custom_stop_words<- c("umhum","hum", "mm", "hm", "um", "hmm", "mhm", "ive", "didnt", "uh", "yep", "yea", "yeah",
+                               "youre", "shes", "uhhuh", "doesnt", "im", "hes", "weve", "wasnt", "theyre", "didnt",
+                               "mmhmm", "whos", "wow", "youve")
+
+clientSR_files <- mult_cls_process("SR", clientSR_transcripts, clientSR_custom_stop_words, weights, freq_thresh)
+clientSR_PMI_list <- clientSR_files$PMI
+
+# save files
+saveRDS(clientSR_files$proc_toks, file = paste0("ChapterVI_SR_toks_list.rds"))
+saveRDS(clientSR_files$PMI, file = paste0("ChapterVI_SR_PMI_list.rds"))
+```
+
+```{r client JU save processed files}
+# CLIENT "JU" ------------------------------------------------------------------
+clientJU_pdf1 <- pdf_text("Client 'Ju' Part 1 - Nov 14, 2012 - May 20, 2013.pdf") 
+clientJU_pdf2 <- pdf_text("Client 'Ju' Part 2 - May 21, 2013 - April 29, 2014.pdf")
+
+# delimiter
+delimiter <- "\nEND TRANSCRIPT\n"
+
+clientJU_pdf1 <- paste(clientJU_pdf1, collapse = "\n")
+clientJU_p1 <- strsplit(clientJU_pdf1, delimiter)[[1]]
+
+clientJU_pdf2 <- paste(clientJU_pdf2, collapse = "\n")
+clientJU_p2 <- strsplit(clientJU_pdf2, delimiter)[[1]]
+
+# combine transcripts into one
+clientJU_transcripts <- c(clientJU_p1, clientJU_p2)
+length(clientJU_transcripts)
+nchar(clientJU_transcripts)
+
+# SPECIFY ARGUMENTS AND APPLY FUNCTIONS ----------------------------------------
+
+# Specify argument values
+clientJU_custom_stop_words<- c("hum", "mm", "hm", "um", "hmm", "mhm", "ive", "didnt", "uh", "yep", "yea", "yeah",
+                               "youre", "shes", "uhhuh", "doesnt", "im", "hes", "weve", "wasnt", "theyre", "didnt",
+                               "mmhmm", "havent")
+clientJU_files <- mult_cls_process("JU", clientJU_transcripts, clientJU_custom_stop_words, weights, freq_thresh)
+clientJU_PMI_list <- clientJU_files$PMI
+
+# save files
+saveRDS(clientJU_files$proc_toks, file = paste0("ChapterVI_JU_toks_list.rds"))
+saveRDS(clientJU_files$PMI, file = paste0("ChapterVI_JU_PMI_list.rds"))
+```
+
+```{r client SRH save processed files}
+# CLIENT "SRH" ------------------------------------------------------------------
+clientSRH_pdf1 <- pdf_text("Client 'SRH' Oct 10, 2013 Jan 14, 2014.pdf")
+
+# delimiter
+delimiter <- "\nEND TRANSCRIPT\n"
+
+clientSRH_pdf1 <- paste(clientSRH_pdf1, collapse = "\n")
+clientSRH_p1 <- strsplit(clientSRH_pdf1, delimiter)[[1]]
+
+# combine transcripts into one
+clientSRH_transcripts <- c(clientSRH_p1)
+length(clientSRH_transcripts)
+nchar(clientSRH_transcripts)
+
+
+# SPECIFY ARGUMENTS AND APPLY FUNCTIONS ----------------------------------------
+
+# Specify argument values
+clientSRH_custom_stop_words<- c("hum", "mm", "hm", "um", "hmm", "mhm", "ive", "didnt", "uh", "yep", "yea", "yeah",
+                               "youre", "shes", "uhhuh", "doesnt", "im", "hes", "weve", "wasnt", "theyre", "didnt",
+                               "mmhmm", "havent")
+clientSRH_files <- mult_cls_process("SRH", clientSRH_transcripts, clientSRH_custom_stop_words, weights, freq_thresh)
+clientSRH_PMI_list <- clientSRH_files$PMI
+
+# save files
+saveRDS(clientSRH_files$proc_toks, file = paste0("ChapterVI_SRH_toks_list.rds"))
+saveRDS(clientSRH_files$PMI, file = paste0("ChapterVI_SRH_PMI_list.rds"))
+```
+
+```{r client SZ save processed files}
+# CLIENT "SZ" ------------------------------------------------------------------
+clientSZ_pdf1 <- pdf_text("Client 'SZ' Feb 12, 2013 May 30, 2014.pdf")
+
+# delimiter
+delimiter <- "\nEND TRANSCRIPT\n"
+
+clientSZ_pdf1 <- paste(clientSZ_pdf1, collapse = "\n")
+clientSZ_p1 <- strsplit(clientSZ_pdf1, delimiter)[[1]]
+
+# combine transcripts into one
+clientSZ_transcripts <- c(clientSZ_p1)
+length(clientSZ_transcripts)
+nchar(clientSZ_transcripts)
+
+# SPECIFY ARGUMENTS AND APPLY FUNCTIONS ----------------------------------------
+
+# Specify argument values
+clientSZ_custom_stop_words<- c("hum", "mm", "hm", "um", "hmm", "mhm", "ive", "didnt", "uh", "yep", "yea", "yeah",
+                               "youre", "shes", "uhhuh", "doesnt", "im", "hes", "weve", "wasnt", "theyre", "didnt",
+                               "mmhmm", "havent")
+
+clientSZ_files <- mult_cls_process("SZ", clientSZ_transcripts, clientSZ_custom_stop_words, weights, freq_thresh)
+clientSZ_PMI_list <- clientSZ_files$PMI
+
+# save files
+saveRDS(clientSZ_files$proc_toks, file = paste0("ChapterVI_SZ_toks_list.rds"))
+saveRDS(clientSZ_files$PMI, file = paste0("ChapterVI_SZ_PMI_list.rds"))
+```
+
+############### LEVEL TWO ################
+```{r apply through all sessions}
+# sentiment analysis-specific processing and cleaning
+clients <- c("RY", "M", "SR", "JU", "SRH", "SZ")
+for(c in 1:length(clients)){
+  client_sent_list <- list()
+  client <- clients[c]
+  transcripts <- get(paste0("client", client, "_transcripts"))
+  for(s in 1:length(transcripts)){
+    text <- transcripts[s] %>%
+      str_replace_all("’", "'")
+    
+    linenumb_text <- clean_text_sent_func(text)
+    neg_corrected_tokens <- neg_corrected_sent(negations, linenumb_text, index_n = 20,         stop_words = stop_words2)
+    client_sent_list[[s]] <- neg_corrected_tokens
+  }
+  # save the session-wise list of sentiment scored tokens
+  saveRDS(client_sent_list, file = paste0("ChapterVI_", client,"_sent_scores_list.rds"))
+} 
+```
+
+############### LEVEL THREE ################
+```{r dps and dp summary per client}
+# calculate dps and summary for each client
+client_dps <- function(PMI_list, nsess){
+  # calculate dot products for each client
+  client_dp_list <- dp_all_sessions(PMI_list)
+  client_dp_summ <- dp_df_func(client_dp_list, max_sess = nsess)
+  return(list(dps = client_dp_list, dps_summ = client_dp_summ))
+}
+
+clients <- c("RY", "M", "SR", "JU", "SRH", "SZ")
+cl_nsess <- cls_n_sess <- c(56, 36, 18, 57, 11, 24)
+
+for(c in 1:length(clients)){
+  cl_name <- clients[c]
+  nsess <- cls_n_sess[c]
+  PMI_list <- get(paste0("client", cl_name,"_PMI_list"))
+  cl_dps <- client_dps(PMI_list, nsess)
+  
+  saveRDS(cl_dps$dps, file = paste0("ChapterVI_", cl_name, "_dp_list.rds"))
+  saveRDS(cl_dps$dps_summ, file = paste0("ChapterVI_", cl_name, "_dp_summ.rds"))
+}
+```
+
+
+
+
+
+
+
+
+
+
+
+
