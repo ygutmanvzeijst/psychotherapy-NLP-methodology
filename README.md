@@ -2,7 +2,7 @@
 
 ### Thesis R code for replication of the results and general application of the NLP methodology for psychotherapy analysis
 
-The following repository presents an outline of the code implemented in the thesis project Natural Language Processing (NLP) techniques as methodology for psychotherapeutic treatment research, which has been construed as to allow the researcher to either replicate the analysis as it is presented in this project, or used to analyze their own dataset. The outline of the code has been presented in the order of the thesis chapters, so that the researcher can follow the steps in the order they have been displayed. 
+The following repository presents an outline of the code implemented in the thesis project Natural Language Processing (NLP) techniques as methodology for psychotherapeutic treatment research, which has been construed as to allow the user to either replicate the analysis as it is presented in this project, or use it to analyze their own dataset. For replication of the results, the code has been presented in the order they are displayed on the thesis.
 
 Folders:
 #### 1) Thesis_Replicate_Results
