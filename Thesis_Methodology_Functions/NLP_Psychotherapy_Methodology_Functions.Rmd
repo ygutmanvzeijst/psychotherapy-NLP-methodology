@@ -1,0 +1,1002 @@
+---
+title: "NLP_Psychotherapy_Methodology_Functions"
+author: "Yael Gutman"
+date: "`r Sys.Date()`"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load libraries
+```{r libraries}
+library(dplyr)
+library(tidyr)
+library(text2vec)
+library(tidyverse)
+library(tidytext)
+library(ggplot2)
+library(tm)
+library(stringr)
+library(pdftools)
+library(scales)
+library(reshape2)
+library(textstem)
+library(wordcloud)
+library(ggraph)
+library(widyr)
+library(igraph)
+library(patchwork)
+library(GGally)
+library(reshape2)
+library(knitr)
+library(kableExtra)
+library(textclean)
+library(Matrix)
+library(readr)
+library(lexicon)
+library(proxy)
+library(patchwork)
+library(mgcv)
+```
+
+################### NLP Psychotherapy Methodology Functions ####################
+
+This is a basic instruction manual on how to apply the three-layered NLP methodology functions to analyze psychotherapy transcripts as illustrated in the Thesis: *Natural Language Processing (NLP) techniques as methodology for psychotherapy research*. Each function required for the application of the methodology is presented along with a brief description. The last section offers a demonstration of the use of each function on an example case.
+
+This instruction manual is composed of the following sections:
+
+A) Cleaning and pre-processing
+B) Level one: word frequency and TF-IDF values
+C) Level two: sentiment analysis
+D) Level three: PMI values and dot product summary
+E) Case example application
+
+
+# A) CLEANING AND PRE-PROCESSING -----------------------------------------------
+Before any procedures can be applied, the transcript must undergo pre-processing steps (tokenization, low frequency word removal, removal of stop words, and lemmatization).
+
+*Cleaning*
+In order for a file to be pre-processed, it needs to be cleaned and adapted to the required format (lowercase, no speaker labels, no special characters, no brackets or parenthesis, no additional white spaces). The following is an example of a cleaning function adapted to the sample transcript used in Chapter V. Example Case of the thesis.
+
+For the Chapter V. Example case transcript, the cleaning function was adapted to carry out the following steps: 
+    * Replacing the end of line character "\n" with a single white space
+    * Removal of speaker labels
+    * Replacing the curly apostrophe with a straight apostrophe (the contraction function only recognizes straight apostrophes) 
+    * Replaces contractions with its full form
+    * Removal of text in parenthesis/brackets
+    * Removal of digits and any remaining punctuation
+    * Transforming text into lowercase
+    * Removal of any additional white spaces
+    
+```{r example cleaning function}
+# CLEANING FUNCTION ------------------------------------------------------------
+clean_func <- function(text){
+  # collapse into single string
+  text <- paste(text, collapse = "\n")
+  remov <- gsub("\n", " ", text)
+  remov <- remov %>%
+  str_replace_all("’", "'") %>% 
+    replace_contraction() %>%
+    str_replace_all("\\b[A-Z]{1}[0-9]+\\b", "") %>% # remove single uppercase letter folllowed by number
+    str_replace_all("\\([^\\)]*\\)|\\[[^\\]]*\\]", "") %>% # remove text in parenthesis or brackets
+    str_replace_all("\\s+", " ") %>% # remove additional space
+    str_replace_all("[0-9]", "") %>%
+    as.character() %>%
+    removePunctuation(ucp = TRUE) %>% # removes all punctuation including parenthesis
+    tolower() %>%
+    str_replace_all("  ", " ") # this eliminates any remaining unwanted white space
+  
+  return(remov)
+}
+```
+
+*Pre-processing*
+The functions below take the cleaned text string as input and process it into the appropriate format for subsequent steps. Often, case-specific stop words not included in the general stop word lexicon (e.g. 'mhmm','uhh 'yeah'), can become apparent after an initial exploratory analysis of the tokens. Based on this, one may choose to add a customized list of stop words as an argument. The frequency threshold is a parameter selected by the researcher, which may require further experimentation.
+
+```{r pre-processing functions}
+# Tokenization: convert string to tibble and create tokens
+token_func <- function(processed_text){
+  
+  # convert string into tibble
+  text_df <- tibble(text = processed_text)
+  
+  # convert to tokens
+  text_tokens <- text_df %>%
+    unnest_tokens(word, text)
+  
+  return(text_tokens)
+}
+
+# Stop words removal
+stop_words_removal <- function(text_tokens, custom_stop_words){
+  # adds custom stop-words to stop-word lexicon
+  stop_words <- rbind(stop_words, data.frame( word = custom_stop_words, lexicon = "custom"))
+  
+  # removes words in stop-word lexicon
+  nostop_text_tokens <- text_tokens %>%
+    anti_join(stop_words, by = "word")
+  
+  return(nostop_text_tokens)
+}
+
+# Lemmatization: uses textstem, however, results are not optimal (e.g. feelings and feel are not given the same lemma)
+lemmatization_func <- function(nostop_text_tokens){
+  
+  # uses hash_lemmas lexicon to lemmatize the tokens
+  lemm_tokens <- nostop_text_tokens %>%
+    mutate(word = lemmatize_strings(word, dictionary = lexicon::hash_lemmas))
+  
+  return(lemm_tokens)
+}
+
+# Rare words removal: empty function for now
+rare_words_removal <- function(lemm_tokens, freq_threshold){
+  
+  # Add row number to preserve order
+  lemm_tokens <- lemm_tokens %>%
+    mutate(row_num = row_number())
+  
+  # count n words
+  lemma_count <- lemm_tokens %>%
+    count(word)
+  
+  # filter words with count less than threshold
+  norare_text_tokens <- lemm_tokens %>%
+    inner_join(lemma_count %>% filter(n > freq_threshold), by = "word") %>%
+    arrange(row_num) %>%
+    dplyr::select(-row_num, -n)
+  
+  return(norare_text_tokens)
+}
+
+# function to carry out pre-processing steps on cleaned text. specify stop words and low frequency word removal threshold
+  # input: a single string 
+  # output: processed tokens
+preprocess_pipeline <- function(text, custom_stop_words, freq_threshold){
+  text_tokens <- token_func(text)
+  nostop_text_tokens <- stop_words_removal(text_tokens, custom_stop_words)
+  lemm_tokens <- lemmatization_func(nostop_text_tokens)
+  processed_tokens <- rare_words_removal(lemm_tokens, freq_threshold)
+  return(processed_tokens)
+}
+```
+
+**For multiple sessions**
+The steps are recommended to be applied for multiple sessions of a single treatment.
+For this, each session transcript must be saved as a separate item in a list of transcripts. The full client transcript list can then be processed with the following code:
+
+```{r proc tokens mutliple sessions}
+# function to process each session's raw transcript and output the processed tokens
+  # input: raw transcript list
+  # output: a list of processed tokens per session
+proc_multiple_sess <- function(transcript_list, custom_stop_words, freq_threshold){
+  
+  client_proc_toks_list <- list()
+  for(s in 1:length(transcript_list)){
+    text <- transcript_list[s]
+    clean_text <- clean_func(text)
+    proc_toks <- preprocess_pipeline(clean_text, custom_stop_words, freq_threshold)
+    client_proc_toks_list[[s]] <- proc_toks
+  }
+  
+return(client_proc_toks_list)
+}
+```
+
+# B) LEVEL ONE: WORD FREQUENCY AND TF-IDF VALUES -------------------------------
+
+The list of processed tokens per session, obtained in the previous step, requires an additional adaptation for the first level word frequency analysis. The first function generates a dataframe with two columns: one containing each of the processed tokens, and the other the corresponding session number.
+
+```{r processed toks df}
+# function to transform the processed tokens list into a dataframe with session number
+  # input: processed tokens list per session
+  # output: data frame of tokens by session (for level one analysis)
+proc_toks_df_func <- function(client_proc_toks_list){  
+  # create a dataframe of tokens by session number
+  sess_bind <- data_frame(word = c(), session = c())
+  for(s in 1:length(client_proc_toks_list)){
+    sess <- client_proc_toks_list[[s]]
+    sess <- sess %>%
+      mutate(session = paste0("Session_", s))
+    sess_bind <- rbind(sess_bind, sess)
+  }
+proc_toks_df <- sess_bind
+return(proc_toks_df)
+}
+```
+
+The next function uses the obtained dataframe of processed tokens per session to calculate the tf-idf values, based on every unique word's distribution across the full treatment. The output of this function is a data frame with the tf-idf values displayed in descending order, where the highest tf-idf-valued word indicates a word with a high but specific frequency to that particular session.
+
+```{r tf-idf function}
+# function to calculate tf-idf values from processed tokens df
+  # input: a dataframe containing a column of tokens and a column of the corresponding session number
+  # output: dataframe of tf-idf values in descending order
+tf_idf_func <- function(proc_toks_df){
+  
+  # count words per session df
+  client_count <- proc_toks_df %>%
+  count(session, word, sort = TRUE)
+  
+  # calculate total words per session
+  total_words <- client_count %>%
+    group_by(session) %>%
+    summarize(total = sum(n))
+  
+  # calculate tf
+  session_words <- left_join(client_count, total_words) %>%
+    mutate(tf = n/total)
+
+  # convert session to factor
+  session_words$session <- as.factor(session_words$session)
+
+  # calculate tf-idf and arrange in descending value
+  session_words <- session_words %>%
+    mutate(session_number = str_extract(session, "\\d+") %>% as.numeric())
+    
+  # calculate tf-idf   
+  tfidf_words <- session_words %>%
+    bind_tf_idf(word, session, n) %>%
+    arrange(desc(tf_idf))
+}
+```
+
+The function below generates bar plots of the top TF-IDF-valued n number of words for the specified session(s). The user must indicate the session numbers to be included, the amount of top n words, the tf-idf dataframe of values extracted from the previous step and the maximum value of the TF-IDF for adjusting the plot display.
+
+*Visualization of TF-IDF values*
+```{r function for tf-idf plots}
+# function to generate the (highest) tf-idf values per session plot
+  # input: tf-idf dataframe, session number and maximum value of tf-idf to adjust plot
+  # output: a bar plot displaying the top 15 words of the session with highest tf-idf
+
+tfidf_plots <- function(sess, top_n, tf_idf_df, max_y){
+  # filter tf-idf dataframe for words in specificed session
+  sess_tfidf <- tf_idf_df %>%
+  filter(session_number %in% sess)
+
+tfidf_plot <- sess_tfidf %>%
+  # group tf-idf dataframe by session
+  group_by(session) %>%
+  arrange(desc(tf_idf)) %>%
+  # select top n words
+  slice_head(n = top_n) %>%
+    ungroup() %>%
+  mutate(word = reorder_within(word, tf_idf, session)) %>% 
+  ggplot(aes(word, tf_idf, fill = session)) +
+  ylim(0, max_y) +
+  geom_col(show.legend = FALSE) +
+  scale_x_reordered(name = NULL) +  
+  labs(x = NULL, y = "tf-idf") +
+  facet_wrap(~session_number, ncol = 3, scales = "free") +
+  coord_flip() +
+  ggtitle("Top 15 TF-IDF words for session") +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 11), # Center and bold title
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12)
+  )
+
+return(tfidf_plot)
+}
+```
+
+
+
+# C) LEVEL TWO: SENTIMENT ANALYSIS ---------------------------------------------
+
+*Sentiment-specific cleaning function*
+In order to carry out the sentiment analysis, the original raw transcript needs to be formatted in a slightly modified version. Here the transcript is divided by numbered lines of text, which are then used for counting sections of the session to assign sentiment scores. The previous cleaning function removed end of line characters ('\n'). In this case, the text is split into lines by identifying these characters. The user is advised to verify if the cleaning function offered below returns the expected cleaned text format (by comparing it with the example case output text shown in the last section), otherwise the function may need to be adjusted so that the raw transcript can be appropriately split by lines or sentences.
+
+```{r clean text func}
+# function to split by \n or \n\n characters to add line numbers
+  # input: raw transcript
+  # output: a dataframe containing each cleaned line as a separate string per row in column one, and the corresponding line number in column 2
+clean_text_sent_func <- function(text){
+  cleanSent_client <- text %>%
+    replace_contraction() %>%
+    str_replace_all("\\b[A-Z]{1}[0-9]+\\b", "") %>% # remove single uppercase letter folllowed by number
+    str_replace_all("\\([^\\)]*\\)|\\[[^\\]]*\\]", "") %>% # remove text in parenthesis or brackets
+    str_replace_all("[0-9]", "") %>%
+    removePunctuation(ucp = TRUE) %>% # removes all punctuation including parenthesis
+    tolower() %>%
+    # splits text by end of line characters
+    str_split(pattern = "\n{1,2}") %>%
+    unlist() %>%
+    as_tibble() %>%
+    # add line number
+    mutate(line = row_number())
+  return(cleanSent_client)
+}
+```
+
+The following function takes as arguments: a set of negations, the text split by lines with the corresponding line number, the amount of lines to include in a section, and the list of stop words. The previous function produced a dataframe with each row corresponding to a cleaned version of each line of the original text, with its corresponding line number. The negations are a list of negating words (e.g. "no", "not", "never") to use for reverse-scoring negated bigrams. 
+
+```{r negation correcting function}
+# negation-correcting sentiment analysis function
+neg_corrected_sent <- function(text, index_n, custom_stop_words, negations){
+  
+  # make into bigrams
+  bigrams_text <- text %>%
+    unnest_tokens(bigram, value, token = "ngrams", n = 2) 
+    #mutate(line = text$line)
+  
+  # separate them
+  bigram_sep <- bigrams_text %>%
+    separate(bigram, c("word1", "word2"), sep = " ")
+  
+  # filter bigrams where word1 is a negation word
+  negationb <- bigram_sep %>%
+    filter(word1 %in% negations) %>%
+    inner_join(get_sentiments(lexicon = "afinn"), by = c(word2 = "word")) %>%
+    mutate(value = value * -1) %>% 
+    unite(bigram, word1, word2, sep = " ") %>%
+    mutate(word = bigram) %>%
+    select(-bigram)
+  
+  # filter all rows with non-negation word 1 bigrams, make unique words again, then score sentiment
+  unique <- bigram_sep %>%
+    filter(!word1 %in% negations) %>%
+    inner_join(get_sentiments(lexicon = "afinn"), by = c(word2 = "word")) %>%
+    select(-word1) %>%
+    filter(!word2 %in% stop_words$word) %>%
+    filter(!word2 %in% negations) %>%
+    mutate(word = word2) %>%
+    select(-word2)
+  
+  # join back all words
+  comb <- bind_rows(negationb, unique) %>%
+    arrange(line)
+  
+  return(comb)
+}
+```
+
+In order to process multiple sessions for one client, the list of transcript files is provided to the function below, which iterates over each item in the list and returns a list containing for each session a dataframe with three columns: the line number, sentiment value and the corresponding word.  
+
+```{r sent scoring multiple sessions}
+# function to apply sentiment scoring to multiple sessions
+  # input: list of transcripts, negations, stop_words and section number
+  # output: list of sentiment-scored sessions
+sent_multiple_sess <- function(transcript_list, index_n, custom_stop_words){
+    
+  # cleaning transcripts for sentiment-specific format
+    stop_words <- rbind(stop_words, data.frame(word = custom_stop_words, 
+                                               lexicon = "custom"))
+  
+    negations <- c("no", "not", "never", "none", "neither", "nobody",
+                   "nothing", "nowhere", "hardly", "scarcely", "barely",
+                   "without", "except", "fail", "seldom")
+    
+    stop_words2 <- stop_words %>%
+      filter(!word %in% negations)
+  
+  client_sent_list <- list()
+  for(s in 1:length(transcript_list)){
+    text <- transcript_list[[s]]
+    clean_text <- clean_text_sent_func(text)
+    sent_scored <- neg_corrected_sent(clean_text, index_n, custom_stop_words, negations) # negations, text, index_n, stop_words
+    client_sent_list[[s]] <- sent_scored
+  }
+  
+return(client_sent_list)
+}
+```
+
+Once the sentiment scores have been generated per session, the following functions allow the user to generate visualizations (raw sentiment scores or GAM-smoothed sentiment signal). These visualizations can be generated in two main modalities: session-wise, where sentiment scores are displayed per sections of the session, or treatment-wise, where total sentiment scores are displayed by session number in the treatment.
+
+```{r total sentiment summing functions}
+# function to calculate sentiment total score per session
+  # input: a dataframe of sentiment scores for one session
+  # output: a sum of sentiment scores per specified section
+sent_score_sess <- function(session_tokens, ind_n){
+  
+  # group lines by specified section parameter and sum total sentiment scores
+  sent_scores <- session_tokens %>%
+    group_by(index = line %/% ind_n) %>%
+    summarise(sentiment = sum(value, na.rm = TRUE))
+  return(sent_scores)
+}
+
+# function to calculate sentiment total score per complete treatment
+  # input: a list of sentiment scores for multiple sessions
+  # output: a vector of the summed sentiment scores for multiple sessions
+total_sent_scores <- function(client_sent_score_list, ind_n){
+  
+  # loop to fill with total sentiment scores
+  client_total_sent_scores <- list()
+  total_sents_all <- c()
+
+  for(s in 1:length(client_sent_score_list)){
+    client_sess_toks <- as.data.frame(client_sent_score_list[s])
+    client_sess_sent <- sent_score_sess(client_sess_toks, ind_n)
+    client_total_sent_scores[[s]] <- client_sess_sent
+    total_sents_all[s] <- sum(client_sess_sent$sentiment)
+  }
+  return(total_sents_all)
+}
+```
+
+*Single session vs. full treatment sentiment analysis*
+As mentioned above, sentiment plots can be generated in two main modalities: single or full-treatment. The functions below allow the user to select the modality. If 'single' the sentiment plots will be generated for the specified session number and section size, so that sentiment scores are summed for each section (e.g. 20 lines) and plotted for a single session transcript. In case the user selects full-treatment, the sentiment scores will be summed both per specified section size and also as a single summed sentiment per session, which is then plotted along the session number. The sentiment plot may be generated for raw sentiment scores or as a GAM-smoothed sentiment signal.
+
+```{r single vs. full raw sentiment plots}
+# single session raw sentiment plotting function
+  # input: sentiment scores per session list session number, section number, and y-coordinate limits
+  # output: a raw sentiment by section plot for a single session analysis
+session_raw_sent <- function(client_sent_score_list, plot_modality, sess, ind_n){
+  
+  if(plot_modality == 'single'){
+    # extract session number from sentiment score list
+    sess_toks <- client_sent_score_list[[sess]]
+    # classify as positive vs. negative
+    sess_scored <- sent_score_sess(sess_toks, ind_n) %>%
+      mutate(tot_sent = as.factor(ifelse(sentiment > 0, "positive", "negative")))
+    
+    # plot sentiment scores by section
+    sess_plot <- ggplot(sess_scored, aes(index, sentiment)) +
+    geom_point(aes(col = tot_sent), size = 2) + 
+    geom_line(data = sess_scored, aes(index, sentiment), size = 0.5) +
+    scale_color_manual(values = c("negative" = "red", "positive" = "green")) +
+    theme_bw() +
+    geom_vline(xintercept = 0, color = "black", size=0.3) +
+    geom_hline(yintercept = 0, color = "black", size=0.3) +
+    labs( title = paste0("Session raw sentiment scores per section ", sess),
+          x = "Section",
+          y = "Net sentiment score",
+          color = "Total sentiment") +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 12))
+    
+    return(sess_plot)
+  }
+  
+  else if(plot_modality == 'full'){
+    nsess <- length(client_sent_score_list)
+    
+    # loop to fill with total sentiment scores
+      client_total_sent_scores <- list()
+      total_sents_all <- c()
+
+    # assign total sentiment scores per session in full treatment
+      total_sents_all <- total_sent_scores(client_sent_score_list, ind_n)
+  
+    # create dataframe to store total sentiment scores
+    client_total_sent_df <- data.frame(session = c(1:nsess), 
+                                      total_sent = total_sents_all)
+    # classify score as either positive or negative
+    client_total_sent_df <- client_total_sent_df %>%
+      mutate(sentiment = as.factor(ifelse(total_sent > 0, "positive", "negative")))
+  
+    # plot sentiment scores by session number
+    full_splot <- ggplot(client_total_sent_df, aes(session, total_sent)) +
+      geom_point(aes(col = sentiment), size = 2) + 
+      geom_line(data = client_total_sent_df, aes(session, total_sent), size = 0.5) +
+      scale_color_manual(values = c("negative" = "red", "positive" = "green")) +
+      theme_bw() +
+      geom_vline(xintercept = 0, color = "black", size=0.3) +
+      geom_hline(yintercept = 0, color = "black", size=0.3) +
+      labs( title = "Full treatment raw sentiment scores",
+            x = "Session",
+            y = "Net sentiment score",
+            color = "Total sentiment") +
+      theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 12))
+    
+    return(full_splot)
+  }
+  
+  else{
+    print("Error, please specify a valid plot modality")
+  }
+}
+```
+
+```{r single vs. full GAM sentiment analysis plot}
+# gam-smoothed sentiment plotting function
+  # input: sentiment scores per session list, plot modality (either single or full), the session number if plot modality is 'single', and the section size
+  # output: a GAM-smoothed sentiment analysis plot
+sent_gam_func <- function(client_sent_score_list, plot_modality, sess, ind_n){
+  
+  nsess <- length(client_sent_score_list)
+  
+  if(plot_modality == 'single'){
+    # extract session number from sentiment score list
+    sess_toks <- client_sent_score_list[[sess]]
+    # classify as positive vs. negative
+    sess_scored <- sent_score_sess(sess_toks, ind_n) %>%
+      mutate(tot_sent = as.factor(ifelse(sentiment > 0, "positive", "negative")))
+    
+    # GAM plot
+    sent_gam <- gam(sentiment ~ s(index), data = sess_scored)
+    # create a sequence of index values for a smooth curve
+    index_seq <- seq(min(sess_scored$index),
+                   max(sess_scored$index),
+                   length.out = 500)
+    # create new data for prediction
+    new_data <- data.frame(index = index_seq)
+    # predict using the GAM model
+    smoothed_preds <- predict(sent_gam, newdata = new_data)
+    # plot of gam-smoothed line
+    plot(index_seq, smoothed_preds, type = "l",
+       xlab = "Section", ylab = "Net sentiment score",
+       main = "")
+    abline(h = 0, col = "black", lty = 2)
+    title(paste0("GAM model-smoothed sentiment scores for session ", sess), font.main = 2)
+  }
+  
+  else if(plot_modality == 'full'){
+    # calculate total sentiment
+    total_sents_all <- total_sent_scores(client_sent_score_list, ind_n)
+  
+    # create dataframe to store total sentiment scores
+    client_total_sent_df <- data.frame(session = c(1:nsess), 
+                                      total_sent = total_sents_all)
+    
+    # classify score as either positive or negative
+    client_total_sent_df <- client_total_sent_df %>%
+        mutate(sentiment = as.factor(ifelse(total_sent > 0, "positive", "negative")))
+    
+    # count number of sessions
+    n_unique <- length(unique(client_total_sent_df$session))
+    
+    # if number of sessions below 5 return warning
+      if (n_unique < 5) {
+      stop(paste0(
+        "Not enough data points to fit a GAM smoother (only ", n_unique, 
+        " unique values)."
+      ))
+    }
+    
+    # if session number is low, the number of basis functions needs to be reduced 
+    k_value <- if (n_unique >= 5 && n_unique < 10) 4 else NULL
+    
+    # if session number less than 10, readjust basis functions parameter
+    if (!is.null(k_value)) {
+      client_gam <- gam(total_sent ~ s(session, k = k_value), data = client_total_sent_df)
+    } else {
+      client_gam <- gam(total_sent ~ s(session), data = client_total_sent_df)  # use default k
+    }
+    
+    # GAM plot
+    df <- client_gam$model  
+    pred <- predict(client_gam)
+    
+    # plot predicted values
+    plot(df$session, pred, type = "l", 
+         xlab = "Session", ylab = "Net sentiment score", 
+         main = "")
+    abline(h = 0, col = "black", lty = 2)
+    title("Full-treatment GAM-smoothed sentiment signal", font.main = 2)
+  }
+  
+  else{
+    print("Error, please specify a valid plot modality")
+  }
+}
+```
+
+
+# D) LEVEL THREE: PMI VALUES AND DOT PRODUCT SUMMARY ---------------------------
+*Co-occurrence matrix and PMI values*
+In order to generate the co-occurrence matrix, which is then transformed into a PMI matrix per session, the functions below require the same processed tokens extracted from the pre-processing function in part A) CLEANING AND PRE-PROCESSING. 
+
+First the individual functions need to be run:
+```{r co-occurrence to PMI matrix functions}
+### Functions: co-occ matrix, word_count, pmi_formula_COR, assoc_matrix_func_COR, pipeline_matrices_func_COR
+# PMI matrix function correction --------------------------------------------
+co_occ_matrix_func_COR <- function(lemm_tokens, window_size, weights){
+  
+  if(is.null(weights) == TRUE){
+    weights <- rep(1, window_size)
+  }
+  else{
+    weights <- 1/seq_len(window_size)
+  }
+  
+  # create an iterator and a unique vocabulary of terms
+  words_ls <- list(lemm_tokens$word)
+  it <- itoken(words_ls, progressbar = FALSE ) # itoken: allows the iteration of each token at a time, for memory purposes
+  vocab <- create_vocabulary(it) 
+  
+  # create a token co-occurrence matrix (TCM) using iterator, vectorizer and specified window
+  vectorizer <- vocab_vectorizer(vocab) 
+  tcm <- create_tcm(it, vectorizer, weights, skip_grams_window = window_size,
+                    skip_grams_window_context = "symmetric")
+
+  # symmetrize matrix
+  tcm_matrix <- as.matrix(tcm)
+  tcm_matrix[lower.tri(tcm_matrix)] <- t(tcm_matrix)[lower.tri(tcm_matrix)]
+  
+  return(tcm_matrix)
+}
+
+word_count <- function(final_tokens, tcm_matrix){
+  # Create the dictionary with word counts
+  word_counts <- final_tokens %>%
+    group_by(word) %>%
+    summarise(count = n(), .groups = 'drop')
+  
+  # arrange word counts in order of tcm
+  tcm_words <- colnames(tcm_matrix)
+  word_counts <- word_counts %>%
+    mutate(word = factor(word, levels = tcm_words)) %>%
+    arrange(word)
+  word_counts <- word_counts$count
+  
+  return(word_counts)
+}
+
+pmi_formula_COR <- function(wco_prob, mult_ind_prob){
+  value <- log2(wco_prob / mult_ind_prob)
+  return(value)
+}
+
+assoc_matrix_func_COR <- function(tcm_matrix, tformula, n_words, word_counts){
+  
+  # convert into a sparse matrix
+  tcm_sparse_matrix <-  Matrix(tcm_matrix, sparse=T)
+  tcm_sparse_matrix <- as(tcm_sparse_matrix, "TsparseMatrix")
+  
+  # Calculate independent word-co-occurrence probabilities for each word
+  row_prob <- word_counts / n_words
+  col_prob <- word_counts / n_words
+  
+  # Create a sparse matrix to store PMI values
+  r_words <- nrow(tcm_sparse_matrix)
+  c_words <- ncol(tcm_sparse_matrix)
+  tmatrix <- matrix(0, nrow = r_words, ncol = c_words)
+  
+  # Iterate over non-zero elements of the sparse matrix
+  for (i in seq_len(length(tcm_sparse_matrix@x))){
+    r <- tcm_sparse_matrix@i[i] + 1  # Row index (convert from 0-based to 1-based)
+    c <- tcm_sparse_matrix@j[i] + 1  # Column index (convert from 0-based to 1-based)
+    wco <- tcm_sparse_matrix@x[i]    # Word co-occurrence count
+    
+    # pair word co-occurrence probability
+    wco_prob <- ( wco / n_words )
+    
+    # multiplied independent probabilities for each word
+    mult_ind_prob <- ( row_prob[r] * col_prob[c] )
+    if(mult_ind_prob == 0){
+      tmatrix[r, c] <- 0
+    }
+    else{
+      # calculate association measure according to given formula
+      tmatrix[r, c] <- tformula(wco_prob, mult_ind_prob)
+    }
+  }
+  # make matrix sparse and symmetrize
+  tmatrix <- Matrix(tmatrix, sparse=T)
+  pmi_matrix <- as.matrix(tmatrix)
+  pmi_matrix[lower.tri(pmi_matrix)] <- t(pmi_matrix)[lower.tri(pmi_matrix)]
+  return(pmi_matrix)
+}
+```
+
+This function then generates the PMI matrix taking the processed tokens as input:
+```{r generate PMI matrices}
+# function to generate PMI matrix per session
+  # input: list of processed tokens per session and specified arguments
+  # output: list of PMI matrices per session 
+PMI_func <- function(client_proc_toks_list, window_size, custom_stop_words, freq_threshold, weights){
+
+  PMI_list <- list()
+  
+    for(s in 1:length(client_proc_toks_list)){
+      # extract each session processed tokens
+      s_proc_toks <- client_proc_toks_list[[s]]
+      # get unique number of words per session
+      n_words <- length(s_proc_toks$word)
+    
+      # Co-occurrence matrix + transformations: PMI, Chi^2, cosine similarity
+      tcm_matrix <- co_occ_matrix_func_COR(s_proc_toks, window_size, weights)
+      word_counts <- word_count(s_proc_toks, tcm_matrix)
+      pmi_matrix <- as.matrix(assoc_matrix_func_COR(tcm_matrix, pmi_formula_COR, n_words, word_counts))
+      
+      # re-assign column and row names
+      colnames(pmi_matrix) <- colnames(tcm_matrix)
+      rownames(pmi_matrix) <- rownames(tcm_matrix)
+      PMI_list[[s]] <- pmi_matrix
+    }
+  return(PMI_list)
+}
+```
+
+Once the PMI matrices have been generated, the user may run the following functions, which calculates the dot products between all possible word pairs for each session, and generates a dot product summary dataframe (mean, variance, coefficient of variation).
+
+*Dot product functions*
+```{r dot product functions}
+# dot product calculation without same word pairs
+dot_prod_func_unique <- function(df){
+  
+# create matrix with # of rows = half of matrix and diagonal (since it is symmetrical)
+  dot_matrix <- matrix(NA, nrow = (nrow(df)*(nrow(df) - 1))/2, ncol = 3)
+  vocab <- colnames(df)
+  rowN <- 1
+  for(v in vocab){
+    for (w in vocab){
+      if( v != w) {
+        # avoid repeated pairs
+       if (which(vocab == v) < which(vocab == w)) {
+          # first word in pair
+          dot_matrix[rowN,1] <- v
+          # second word in pair
+          dot_matrix[rowN,2] <- w
+        
+          # calculate 'pure' dot product
+          dp <- sum(df[,v] * df[,w])
+          dot_matrix[rowN,3] <- dp
+        
+          # update row value
+          rowN <- rowN + 1
+       }
+      }
+    } 
+  }
+  dot_matrix <- na.omit(dot_matrix)
+  colnames(dot_matrix) <- c("word1", "word2", "dp")
+  dot_df <- as.data.frame(dot_matrix)
+  dot_df[,3] <- as.numeric(dot_df[,3])
+  return(dot_df)
+}
+
+mean_var_dp_func <- function(dot_df){
+  mean_var_dp_df <- data_frame(mean_dp = mean(dot_df$dp), 
+                               var_dp = var(dot_df$dp))
+  return(mean_var_dp_df)
+}
+
+dp_all_sessions <- function(client_PMI_list){
+  # dp calculation for all sessions
+  dp_list <- list()
+  vocab <- list()
+  
+  # from 1 to max sessions load files, apply dp function and save into list
+  for(s in seq_along(client_PMI_list)){
+    sess_pmi <- client_PMI_list[[s]]
+    sess_names <- colnames(sess_pmi)
+    
+    # turn pmi into matrix
+    pmi_matrix <- as.matrix(sess_pmi)
+    sess_df <- sess_pmi
+    rownames(sess_df) <- sess_names
+    
+    # get dp df
+    sess_dp <- dot_prod_func_unique(sess_df)
+    dp_list[[s]] <- sess_dp
+    vocab[[s]] <- sess_names
+  }
+  return(list(dp_list = dp_list, vocab = vocab))
+}
+
+# function to create a df summarizing dot products for a session
+dp_df_func <- function(client_dp_list, max_sess){
+  client_dp_all <- client_dp_list$dp_list
+  client_dp_vocab <- client_dp_list$vocab
+  
+  client_vals_df <- data.frame(session = c(1:max_sess), mean = NA, var = NA)
+  for(s in 1:length(client_dp_all)){
+    data <- client_dp_all[[s]]
+    client_vals_df[s,2] <- mean(data$dp)
+    client_vals_df[s,3] <- var(data$dp)
+  }
+  
+  # adding a coefficient of variation column
+  client_sd <- sqrt(client_vals_df$var)
+  client_vals_df <- client_vals_df %>%
+    mutate(var_coeff = client_sd/client_vals_df$mean)
+  return(client_vals_df)
+} 
+```
+
+The next function takes the PMI list, and returns a list with the dot products calculated per session, as well as a single dataframe with the dot product summary.
+
+```{r generate dot products}
+# function to generate dot products
+  # input: PMI matrix per session list
+  # output: dot product per session list and dot product full-treatment summary
+dot_prod_function <- function(PMI_list){
+  max_sess = length(PMI_list)
+  
+  dp_list <- dp_all_sessions(PMI_list)
+  dp_summ <- dp_df_func(dp_list, max_sess)
+  return(list(dp_list = dp_list, dp_summ = dp_summ))
+}
+```
+
+A conceptual space plot can be generated for any dot product of interest. The function below provides the option to generate the conceptual space plot for the highest dot product word pair of a selected session. It accepts as arguments the full-treatment PMI matrix list, the dot product list, the session number and the limits for the y-coordinates.
+
+*Conceptual space plots*
+```{r highest dp function}
+# function to extract highest dp and generate conceptual space plot
+  # input: PMI list, dot product list, selected session for analysis and coordinate limits
+  # output: conceptual space plot for the highest dot product of the session
+high_dp_func <- function(PMI_list, dp_list, s_num, xylim){
+  
+  # extract dps for specified session and vocab list
+  client_dps_s <- dp_list[[1]][[s_num]] %>%
+  arrange(desc(dp))
+  client_vocab_s <- dp_list[[2]][[s_num]]
+  
+  # extract word pair with highest dp 
+  word1 <- client_dps_s[1,1]
+  word2 <- client_dps_s[1,2]
+  
+  # PMI of specified session
+  PMI_s <- as.data.frame(PMI_list[[s_num]])
+  PMI_s$word <-  client_vocab_s
+  
+  # conceptual space plot
+  client_conc_plot <- ggplot(PMI_s, aes(x = .data[[word1]], y = .data[[word2]])) +
+    geom_point() +
+    geom_hline(yintercept = 0, linetype = "solid", color = "black") +  # Add horizontal line at y = 0
+    geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+    geom_abline(slope = 1, intercept = 0, linetype = "dotted", color = "black") +
+    xlim(0,xylim) +
+    ylim(-1.5,xylim) +
+    xlab(word1) +
+    ylab(word2) +
+    ggtitle(paste0("Conceptual space plot for highest dot product of session ", s_num)) +
+     theme_bw() +
+    theme(plot.title = element_text(hjust = 0.5, size = 13)) +
+      geom_text(aes(label = word), check_overlap = TRUE, size = 2.5, hjust = 0.5, vjust = -0.7) 
+  
+  return(client_conc_plot)
+}
+```
+
+*Mean and variance plot*
+```{r mean and variance plot}
+# function to generate the mean vs. variance plot
+  # input: dot product summary data frame extracted from the function 'dot_prod_function' and coordinate limits
+  # output: a mean vs. variance plot for all of the sessions.
+dp_mean_var_plot <- function(dp_summ, xlimm, ylimm){
+  
+  #calculate mean per means and variance
+  mean_means <- mean(dp_summ$mean)
+  mean_vars <- mean(dp_summ$var)
+  
+  # add line for session 1 variance 
+  sess1_var <- dp_summ[1,3]
+  
+  # Added lines plot 1
+  mean_var_plot <- ggplot(dp_summ, aes( x = mean, y = var, col = as.numeric(factor(session)))) +
+    geom_point(size = 4) + 
+    ggtitle("Dot product mean and variance per session") + 
+    xlab("Mean") + 
+    ylab("Variance") + 
+    xlim(xlimm) +
+    ylim(ylimm) +
+    geom_hline(yintercept=sess1_var, linetype= "dashed", color = "darkgrey", size=0.5) +
+    geom_vline(xintercept = mean_means, color = "blue", size=0.3) +
+    geom_hline(yintercept = mean_vars, color = "blue", size=0.3) +
+    #geom_abline(intercept = -11500, slope = 100, color = "black", size = 0.5) +
+    scale_color_gradient(low = "lightgray", high = "purple") +
+    theme_bw() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+          legend.position = "bottom") +
+    labs(color = "Session number") +
+      geom_text(aes(label = session), check_overlap = TRUE, size = 4, hjust = 1.2, vjust = -0.5) 
+  
+  return(mean_var_plot)
+}
+```
+
+*Coefficient of variation plot*
+```{r coeff of var plot}
+# function for plotting the coefficient of variation per therapy session
+  # input: dot product summary data frame
+  # output: a full-treatment coefficient of variation plot by session number
+dp_cv_plot <- function(dp_summ){
+  
+  cv_plot <- ggplot(dp_summ, aes(x = session, y = var_coeff)) +
+      geom_line(aes(y = var_coeff), size = 0.7, col = "blue") +   
+      labs(x = "Session", y = "CV", title = "Dot product coefficient of variation (CV)") +
+      theme_minimal() + 
+      theme(legend.title = element_blank()) +
+      # adds the number of the session
+      geom_text(aes(label = session), check_overlap = TRUE, size = 2.7, hjust = -0.3, vjust = -0.5) 
+  
+  return(cv_plot)
+}
+```
+
+
+# E) CASE EXAMPLE APPLICATION -----------------------------------------------------
+#####################   Example application   ######################
+
+The use of the functions as they have been described in this tutorial are illustrated with the following example analysis, which makes use of the case transcripts presented in the book Counseling and Psychotherapy by Carl Rogers (1942). In this work, Carl introduces the complete phonographically recorded and transcribed case of Herbert Bryan, consisting of eight total sessions.
+
+The session transcripts have been extracted from the book and saved separately as pdf files within the current folder, which can be read-in with the code presented below.
+
+First we load the transcript files and then apply the pre-processing functions:
+```{r read-in herbert session transcripts}
+# read-in the transcript files and save into a list
+herb_transcripts <- list()
+for(s in c(1:8)){
+  herb_sess <- pdf_text(paste0("Session ", s," - The Case of Herbert Bryan - Carl Rogers.pdf"))
+  herb_transcripts[[s]] <- herb_sess
+}
+
+# apply pre-processing function to transcript list, 
+  # specificy custom stop words and low-freq threshold
+custom_stop_words <- c("mhm")
+proc_toks_herb <- proc_multiple_sess(herb_transcripts, custom_stop_words = custom_stop_words, freq_threshold = 2)
+```
+
+# Level One 
+Then we apply the tf-idf functions and plot the top 15 highest TF-IDF-valued words for session 1:
+
+```{r inspect tf-idf vals}
+proc_herb_df <- proc_toks_df_func(proc_toks_herb) 
+herb_tfidf <- tf_idf_func(proc_herb_df)
+
+# plot for session 1
+tfidf_plots(sess = 1, top_n = 15, herb_tfidf, max_y = 0.10)
+```
+
+# Level Two
+The following code applies the sentiment analysis functions and produces both a single session raw sentiment plot and a full-treatment (8 session) raw sentiment plot:
+
+```{r sent analysis}
+# apply sentiment analysis on raw Herbert transcripts with sections of 10 lines 
+herb_sent_list <- sent_multiple_sess(herb_transcripts, index_n = 10, custom_stop_words)
+
+# example use of raw sentiment scores function for a single session
+session_raw_sent(herb_sent_list, plot_modality = 'single', sess = 1, ind_n = 5)
+
+# example use of raw sentiment scores function for full-treatment
+session_raw_sent(herb_sent_list, plot_modality = 'full', ind_n = 10)
+```
+
+Below, the GAM signal has been extracted for both the single session and full-treatment sentiment analysis. Important to note here is that if the session number is too low (below 10), it becomes more difficult to apply a GAM model on the data, since it requires enough information (multiple unique values) to accurately estimate the smoothing functions. The function applied here determines if the amount of sessions is below the threshold of 10, for which the parameter of basis functions is adjusted to a lower value. With too few sessions it would be advised to fit a simpler function instead (e.g. linear regression).
+
+```{r example for running GAM-smoothed sentiment plot}
+sent_gam_func(herb_sent_list, plot_modality = 'single', sess = 1, ind_n = 10)
+sent_gam_func(herb_sent_list, plot_modality = 'full', ind_n = 10)
+```
+
+# Level Three
+The following code takes as input the pre-processed tokens, obtained from an earlier step to generate the PMI list, as well as the dot product list and summary data frame.
+
+Some parameters need to be specified before applying the function such as weights and the frequency threshold. The weights have been set to null, which means all words counted within the sliding window of proximity to neighboring words receive an equal weight when calculating total co-occurrence values. However, the weights could be modified, for example, to increase in value by proximity to the target word (so that the co-occurrence value is increased for words that appear closer to the target word).
+
+```{r PMI and dot product values}
+# parameter setting
+weights <- NULL
+freq_thresh <- 2
+
+# applying PMI, and dot product generating functions
+herb_PMI_list <- PMI_func(proc_toks_herb, window_size = 5, custom_stop_words, freq_threshold = 2, weights = weights)
+herb_dp <- dot_prod_function(herb_PMI_list)
+herb_dp_list <- herb_dp$dp_list
+herb_dp_summ <- herb_dp$dp_summ
+```
+
+Having obtained the PMI and dot product values per session, the following code presents a series of visualizations to examine the values:
+
+  * The first two plots show the conceptual space plots for the highest dot product word pair for sessions 1 and 2.
+  * The third plot displays the mean and variance dot products across all eight sessions.
+  * The fourth plot shows the coefficient of variation obtained across sessions, offering a chronological display of the dot product statistical summary measure through the treatment trajectory.
+  
+The user may need to examine the range of values to set the right coordinate limits. Here the limits for the mean and variance plot were obtained from the dot product summary dataframe, extracted in the previous step.
+
+```{r plots}
+high_dp_func(herb_PMI_list, herb_dp_list, s_num = 1, xylim = 6)
+# to set the correct coordinate limits inspect the range of the dot product mean and variance values
+high_dp_func(herb_PMI_list, herb_dp_list, s_num = 2, xylim = 6)
+# to set the correct coordinate limits inspect the range of the dot product mean and variance values
+range(herb_dp_summ$mean)
+range(herb_dp_summ$var)
+dp_mean_var_plot(herb_dp_summ, c(100,200), c(5000,15000))
+dp_cv_plot(herb_dp_summ)
+```
+
+This tutorial presented a brief example of some of the visualizations that may be extracted with the use of these functions. The user may explore with more detail the differences in values across multiple sessions and in multiple visualizations. They may also wish to consult back to the original raw qualitative transcript to obtain a richer qualitative understanding of the case, as this may be necessary to provide the qualitative context in which to situate the extracted language feature values as observed above.
+
+###################   Reference   ####################
+Rogers, C. R. (1942). Counseling and Psychotherapy: Newer concepts in practice. Houghton Mifflin
+
+
+
+
+
+
