@@ -1,4 +1,5 @@
-### Thesis Methodology Functions
+## Folder 2: Thesis_Methodology_Functions
+
 In this folder, the user may find the code to replicate the functions of the basic three-layered methodological steps on their own set of psychotherapy transcripts. 
 For this, the file titled *NLP_Psychotherapy_Methodology_Functions.Rmd* has been constructed as a brief instruction manual, which the user may follow to carry out the analysis on their own data. 
 An additional case example has been included in the last section to demonstrate specifically how to apply the functions for each step of the analysis. The pdf transcripts required for the case example have been included in the folder, where each session is contained in a different file. 
